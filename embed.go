@@ -12,3 +12,13 @@ import _ "embed"
 //
 //go:embed fingerprints.json
 var FingerprintsJSON []byte
+
+// ProbePacksYAML 是按指纹族组织的漏洞点探测包（只判活，不发 payload）。
+//
+//go:embed rules/probe-packs.yaml
+var ProbePacksYAML []byte
+
+// ExposureYAML 是对所有目标都跑的通用暴露面字典。
+//
+//go:embed rules/exposure.yaml
+var ExposureYAML []byte

@@ -1,0 +1,347 @@
+# 漏洞点探测包（仅判活，绝不发送任何 payload）
+#
+# 结构：<指纹族> → 探测项列表。指纹族与指纹库里的 id/name/product/tags 做
+# 规范化后的子串匹配（忽略大小写与 -/_/. 分隔符），命中该族才会跑对应探测项。
+#
+# 特殊键 `__always__`：不依赖指纹、对所有目标都跑的探测项，只放“价值高且请求极少”的
+# 路径（如 Spring Boot Actuator / Swagger），否则会吃掉请求预算。
+#
+# 每条探测项必须有 matcher：只有返回体（或响应头）里出现该特征串才算命中，
+# 裸 200 一律不算命中（DESIGN.md 第 6 节）。matcher 默认按子串匹配，
+# 置 regex: true 时按 Go 正则匹配。
+#
+# severity 用于报告着色：critical/high/medium/low/info
+
+__always__:
+- path: /actuator/env
+  matcher: propertySources
+  name: Spring Boot Actuator 环境变量
+  severity: high
+- path: /actuator
+  matcher: _links
+  name: Spring Boot Actuator 索引页
+  severity: medium
+- path: /actuator/health
+  matcher: '"status"'
+  name: Spring Boot Actuator 健康检查
+  severity: low
+- path: /actuator/gateway/routes
+  matcher: route_id
+  name: Spring Cloud Gateway 路由泄露
+  severity: high
+- path: /swagger-ui.html
+  matcher: swagger
+  name: Swagger UI 未授权访问
+  severity: medium
+- path: /v2/api-docs
+  matcher: '"paths"'
+  name: Swagger v2 接口文档泄露
+  severity: medium
+- path: /v3/api-docs
+  matcher: openapi
+  name: OpenAPI v3 接口文档泄露
+  severity: medium
+
+spring:
+- path: /actuator/mappings
+  matcher: mappings
+  name: Actuator 路由映射泄露
+  severity: medium
+- path: /actuator/heapdump
+  matcher: JAVA PROFILE
+  name: Actuator heapdump 可下载
+  severity: critical
+- path: /actuator/beans
+  matcher: '"beans"'
+  name: Actuator Bean 列表泄露
+  severity: medium
+- path: /actuator/configprops
+  matcher: configprops
+  name: Actuator 配置属性泄露
+  severity: high
+- path: /actuator/threaddump
+  matcher: threadName
+  name: Actuator 线程栈泄露
+  severity: medium
+- path: /jolokia/list
+  matcher: jolokia
+  name: Jolokia MBean 未授权
+  severity: high
+
+druid:
+- path: /druid/index.html
+  matcher: druid
+  name: Druid 监控台未授权
+  severity: high
+- path: /druid/websession.html
+  matcher: druid
+  name: Druid Session 监控
+  severity: high
+- path: /druid/sql.html
+  matcher: druid
+  name: Druid SQL 监控
+  severity: high
+
+nacos:
+- path: /nacos/
+  matcher: <title>nacos</title>
+  name: Nacos 控制台
+  severity: medium
+- path: /nacos/v1/console/namespaces
+  matcher: namespace
+  name: Nacos 命名空间接口未授权
+  severity: high
+
+xxl-job:
+- path: /xxl-job-admin/
+  matcher: xxl-job
+  name: XXL-JOB 调度台
+  severity: medium
+- path: /xxl-job-admin/toLogin
+  matcher: xxl-job
+  name: XXL-JOB 登录页
+  severity: info
+
+jenkins:
+- path: /api/json
+  matcher: _class
+  name: Jenkins API 未授权
+  severity: high
+- path: /script
+  matcher: Jenkins
+  name: Jenkins Script 控制台
+  severity: critical
+- path: /manage
+  matcher: Jenkins
+  name: Jenkins 管理页
+  severity: medium
+
+gitlab:
+- path: /users/sign_in
+  matcher: GitLab
+  name: GitLab 登录页
+  severity: info
+- path: /explore
+  matcher: GitLab
+  name: GitLab 项目浏览
+  severity: medium
+
+harbor:
+- path: /api/v2.0/systeminfo
+  matcher: harbor_version
+  name: Harbor 系统信息接口未授权
+  severity: high
+- path: /harbor/projects
+  matcher: Harbor
+  name: Harbor 项目管理
+  severity: medium
+
+sonarqube:
+- path: /api/system/status
+  matcher: '"status"'
+  name: SonarQube 系统状态接口
+  severity: medium
+- path: /api/settings/values
+  matcher: '"settings"'
+  name: SonarQube 配置接口未授权
+  severity: high
+
+grafana:
+- path: /api/health
+  matcher: '"database"'
+  name: Grafana 健康接口
+  severity: low
+- path: /login
+  matcher: grafana
+  name: Grafana 登录页
+  severity: info
+
+kibana:
+- path: /api/status
+  matcher: '"version"'
+  name: Kibana 状态接口
+  severity: low
+- path: /app/kibana
+  matcher: kibana
+  name: Kibana 控制台
+  severity: medium
+
+elasticsearch:
+- path: /_cluster/health
+  matcher: cluster_name
+  name: Elasticsearch 集群健康未授权
+  severity: high
+- path: /_cat/indices
+  matcher: green
+  name: Elasticsearch 索引列表未授权
+  severity: high
+
+zabbix:
+- path: /zabbix/index.php
+  matcher: Zabbix
+  name: Zabbix 控制台
+  severity: info
+- path: /zabbix/jsrpc.php
+  matcher: jsonrpc
+  name: Zabbix JSON-RPC 接口
+  severity: medium
+
+phpmyadmin:
+- path: /phpmyadmin/
+  matcher: phpMyAdmin
+  name: phpMyAdmin 控制台
+  severity: medium
+- path: /phpmyadmin/setup/index.php
+  matcher: phpMyAdmin
+  name: phpMyAdmin 安装向导
+  severity: high
+
+tomcat:
+- path: /manager/html
+  matcher: Tomcat
+  name: Tomcat Manager
+  severity: critical
+- path: /host-manager/html
+  matcher: Tomcat
+  name: Tomcat Host Manager
+  severity: high
+- path: /docs/
+  matcher: Apache Tomcat
+  name: Tomcat 默认文档页
+  severity: low
+
+weblogic:
+- path: /console/login/LoginForm.jsp
+  matcher: WebLogic
+  name: WebLogic 控制台
+  severity: medium
+- path: /wls-wsat/CoordinatorPortType
+  matcher: wscoor
+  name: WebLogic WLS-WSAT 组件暴露
+  severity: high
+
+jboss:
+- path: /jmx-console/
+  matcher: JBoss
+  name: JBoss JMX Console
+  severity: critical
+- path: /web-console/
+  matcher: JBoss
+  name: JBoss Web Console
+  severity: high
+- path: /status
+  matcher: JBoss
+  name: JBoss 状态页
+  severity: low
+
+solr:
+- path: /solr/
+  matcher: Solr
+  name: Solr 控制台未授权
+  severity: high
+- path: /solr/admin/cores
+  matcher: '"status"'
+  name: Solr Core 管理接口
+  severity: high
+
+dubbo:
+- path: /dubbo/
+  matcher: dubbo
+  name: Dubbo 管理台
+  severity: medium
+- path: /api/dev/monitor/status
+  matcher: dubbo
+  name: Dubbo 监控接口
+  severity: medium
+
+rabbitmq:
+- path: /api/overview
+  matcher: rabbitmq_version
+  name: RabbitMQ 管理接口未授权
+  severity: high
+- path: /api/queues
+  matcher: '"messages"'
+  name: RabbitMQ 队列信息未授权
+  severity: high
+
+hadoop:
+- path: /ws/v1/cluster/info
+  matcher: clusterInfo
+  name: YARN 集群信息未授权
+  severity: high
+- path: /ws/v1/cluster/apps
+  matcher: '"apps"'
+  name: YARN 应用列表未授权
+  severity: high
+- path: /dfshealth.html
+  matcher: Hadoop
+  name: HDFS NameNode 状态页
+  severity: medium
+
+consul:
+- path: /v1/status/leader
+  matcher: '"'
+  name: Consul 集群状态接口
+  severity: high
+- path: /v1/agent/self
+  matcher: '"Config"'
+  name: Consul Agent 配置泄露
+  severity: high
+- path: /ui/
+  matcher: Consul
+  name: Consul UI 未授权
+  severity: high
+
+prometheus:
+- path: /api/v1/status/config
+  matcher: '"yaml"'
+  name: Prometheus 配置接口未授权
+  severity: high
+- path: /api/v1/targets
+  matcher: '"activeTargets"'
+  name: Prometheus 采集目标泄露
+  severity: medium
+- path: /graph
+  matcher: Prometheus
+  name: Prometheus 表达式浏览器
+  severity: low
+
+minio:
+- path: /minio/login
+  matcher: MinIO
+  name: MinIO 控制台
+  severity: info
+- path: /minio/health/live
+  matcher: '"status"'
+  name: MinIO 健康接口
+  severity: low
+
+kubernetes:
+- path: /api/v1/namespaces
+  matcher: '"kind"'
+  name: Kubernetes API 未授权
+  severity: critical
+- path: /version
+  matcher: '"gitVersion"'
+  name: Kubernetes 版本接口
+  severity: medium
+
+thinkphp:
+- path: /index.php
+  matcher: ThinkPHP
+  name: ThinkPHP 首页
+  severity: info
+- path: /application/
+  matcher: ThinkPHP
+  name: ThinkPHP 应用目录
+  severity: medium
+
+jumpserver:
+- path: /api/health/
+  matcher: '"status"'
+  name: JumpServer 健康接口
+  severity: low
+- path: /core/auth/login/
+  matcher: '"detail"'
+  name: JumpServer 登录接口
+  severity: info

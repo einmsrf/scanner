@@ -9,13 +9,33 @@
 - [x] `config` — 配置文件加载与合并
 - [x] `convert` — FingerprintHub nuclei YAML → 内部 JSON（服务 update 命令）
 - [x] `fingerprint` — 指纹引擎：规则加载、四层兜底匹配（重定向/路径无关/子目录候选/手动 base-path）
-- [ ] `probe` — 漏洞点探测包：指纹→探测路径→内容匹配器 + 通用暴露面字典
+- [x] `probe` — 漏洞点探测包：指纹→探测路径→内容匹配器 + 通用暴露面字典
 - [ ] `jsaudit` — JS 收集（深度1爬取+sourcemap）+ 七类规则提取 + base64 解码
 - [ ] `semantic` — LLM 语义层：OpenAI 兼容客户端，批量打分，可降级
 - [ ] `report` — JSON + HTML 报告
 - [ ] CLI 组装与联调
 
 ## 开发日志
+
+### 2026-09-10 — probe 模块
+
+**probe**（`pkg/probe` + `rules/`）
+- `rules/probe-packs.yaml`：26 个指纹族、7 条 `__always__`、90 条探测项；
+  `rules/exposure.yaml`：通用暴露面字典正好 20 条（设计上限）
+- 强制“每条路径必须带内容匹配器”：缺 matcher / matcher 空 / 正则不可编译一律在解析期报错，
+  并列出全部问题（上限 20 条），不允许悄悄降级成“裸 200 即命中”
+- matcher 默认大小写不敏感子串匹配，`regex: true` 时按 Go 正则；支持 `part: header` 匹配响应头
+- 族触发：族名与指纹 `id`/`name`/`product`/`vendor`/`tags` 规范化后（小写、去 `-_. /`）子串比较，
+  族名短于 3 字符不参与，避免噪声
+- 新增特殊族键 `__always__`：不依赖指纹、对所有目标都跑，只放 Actuator / Swagger 这类
+  高价值低开销路径（上游指纹库 99.9% 是根路径型，“是 Spring Boot 但没被识别”是常态，
+  否则 springboot 的包永远跑不起来）
+- 用 404 基线过滤软 404：`Baseline.SameAs()` 命中即跳过，裸 200 本身不算命中
+- base 回退：探测项会在候选 base（`--base-path`、落地目录）下重试以应对子目录部署；
+  每项最多 2 个 base；检测到通配 200 站点时主动减少 base 尝试并在 `Notes` 说明
+- 开销上限：40 请求 / 族探测项 ≤24，且始终受 httpx 单目标总预算约束
+- 两条针对真实文件的测试：① 规则文件可解析、字段合法、通用字典不超 20 条
+  ② **每个族名都必须能被真实指纹库触发**（防止写出永远跑不起来的死包）——26 个族全部通过
 
 ### 2026-09-10 — httpx / target / config / convert / fingerprint 五个模块
 

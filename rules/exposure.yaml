@@ -1,0 +1,90 @@
+# 通用暴露面字典（对所有目标都跑，≤20 条）
+#
+# 这些是“不该出现在公网”的通用文件/路径。每条都必须带 matcher：
+# 返回体（或响应头）含该特征串才算命中，裸 200 不算（DESIGN.md 第 6 节）。
+# matcher 默认子串匹配，regex: true 时按 Go 正则匹配。
+
+- path: /.git/HEAD
+  matcher: "ref: refs/"
+  name: Git 仓库目录暴露
+  severity: high
+- path: /.git/config
+  matcher: "[core]"
+  name: Git 配置文件暴露
+  severity: high
+- path: /.svn/entries
+  matcher: "^(dir|file)$"
+  regex: true
+  name: SVN 版本信息暴露
+  severity: medium
+- path: /.env
+  matcher: "^[A-Za-z_][A-Za-z0-9_]*="
+  regex: true
+  name: .env 配置文件暴露
+  severity: critical
+- path: /.env.bak
+  matcher: "^[A-Za-z_][A-Za-z0-9_]*="
+  regex: true
+  name: .env 备份文件暴露
+  severity: critical
+- path: /.env.local
+  matcher: "^[A-Za-z_][A-Za-z0-9_]*="
+  regex: true
+  name: .env.local 配置暴露
+  severity: high
+- path: /robots.txt
+  matcher: "Disallow:"
+  name: robots.txt 路径泄露
+  severity: info
+- path: /sitemap.xml
+  matcher: "<urlset"
+  name: sitemap.xml 站点地图
+  severity: info
+- path: /crossdomain.xml
+  matcher: "cross-domain-policy"
+  name: crossdomain.xml 跨域策略
+  severity: low
+- path: /.well-known/security.txt
+  matcher: "Contact:"
+  name: security.txt 安全联系信息
+  severity: info
+- path: /WEB-INF/web.xml
+  matcher: "<web-app"
+  name: WEB-INF/web.xml 部署描述符泄露
+  severity: critical
+- path: /server-status
+  matcher: "Apache Server Status"
+  name: Apache 服务器状态页
+  severity: medium
+- path: /nginx_status
+  matcher: "Active connections"
+  name: Nginx 状态页
+  severity: medium
+- path: /phpinfo.php
+  matcher: "phpinfo()"
+  name: phpinfo 信息泄露
+  severity: high
+- path: /info.php
+  matcher: "phpinfo()"
+  name: phpinfo 信息泄露（info.php）
+  severity: high
+- path: /backup.zip
+  matcher: "PK\u0003\u0004"
+  name: 备份压缩包可下载
+  severity: high
+- path: /www.zip
+  matcher: "PK\u0003\u0004"
+  name: 站点源码压缩包可下载
+  severity: critical
+- path: /db.sql
+  matcher: "CREATE TABLE"
+  name: 数据库导出文件暴露
+  severity: critical
+- path: /dump.sql
+  matcher: "CREATE TABLE"
+  name: 数据库导出文件暴露（dump.sql）
+  severity: critical
+- path: /.DS_Store
+  matcher: "Bud1"
+  name: .DS_Store 目录结构泄露
+  severity: low
