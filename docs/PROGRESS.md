@@ -11,11 +11,23 @@
 - [x] `fingerprint` — 指纹引擎：规则加载、四层兜底匹配（重定向/路径无关/子目录候选/手动 base-path）
 - [x] `probe` — 漏洞点探测包：指纹→探测路径→内容匹配器 + 通用暴露面字典
 - [x] `jsaudit` — JS 收集（深度1爬取+sourcemap）+ 七类规则提取 + base64 解码
-- [ ] `semantic` — LLM 语义层：OpenAI 兼容客户端，批量打分，可降级
+- [x] `semantic` — LLM 语义层：OpenAI 兼容客户端，批量打分，可降级
 - [ ] `report` — JSON + HTML 报告
 - [ ] CLI 组装与联调
 
 ## 开发日志
+
+### 2026-09-10 — semantic 模块
+
+**semantic**（`pkg/semantic`，13 个测试）
+- OpenAI 兼容 `chat/completions`：`Authorization: Bearer`、temperature 0、非流式
+- 复用 httpx 发请求（为此给 `httpx.Request` 加了 `Body []byte` 支持 POST），
+  代理/超时/TLS 策略与扫描侧一致，语义层不限速
+- "批量一次请求"落地为按批合并：单批 40 条、单次扫描最多外发 120 条，均可配
+- 宽容解析模型输出：裸数组 / Markdown 代码块 / `{"results|items|data":[...]}` 三种形态
+- **可降级**：无 api_key 时 `New` 返回 `ErrDisabled`（CLI 静默关闭）；单批失败不拖累其它批，
+  HTTP 报错/垃圾输出都只记录错误，条目退回纯正则结论
+- 置信度钳制 `[0,1]`，理由截断，未知/重复 item 忽略
 
 ### 2026-09-10 — jsaudit 模块（核心）
 

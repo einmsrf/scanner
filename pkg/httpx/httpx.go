@@ -3,6 +3,7 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -77,6 +78,7 @@ type Request struct {
 	Method  string
 	URL     string
 	Headers map[string]string
+	Body    []byte // 非空时作为请求体发送（用于 POST，如语义层调用）
 	MaxBody int64
 }
 
@@ -202,7 +204,11 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		maxBody = c.opts.MaxBody
 	}
 
-	hreq, err := http.NewRequestWithContext(ctx, method, target, nil)
+	var bodyReader io.Reader
+	if len(req.Body) > 0 {
+		bodyReader = bytes.NewReader(req.Body)
+	}
+	hreq, err := http.NewRequestWithContext(ctx, method, target, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("httpx: 构造请求失败: %w", err)
 	}
