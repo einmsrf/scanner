@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -284,6 +285,68 @@ func TestContextCancelAbortsWait(t *testing.T) {
 	defer cancel()
 	if _, err := c.Get(ctx, srv.URL); err == nil {
 		t.Fatal("err = nil, want context deadline exceeded")
+	}
+}
+
+func TestPostSendsBodyAndHeaders(t *testing.T) {
+	var gotBody string
+	var gotCT, gotCustom string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		gotCT = r.Header.Get("Content-Type")
+		gotCustom = r.Header.Get("X-Test")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	c := mustClient(t, Options{QPS: -1})
+	defer c.Close()
+
+	resp, err := c.Do(context.Background(), &Request{
+		Method:  http.MethodPost,
+		URL:     srv.URL,
+		Body:    []byte(`{"hello":"world"}`),
+		Headers: map[string]string{"Content-Type": "application/json", "X-Test": "yes"},
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if gotBody != `{"hello":"world"}` {
+		t.Errorf("body = %q, want 请求体被发送", gotBody)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("Content-Type = %q", gotCT)
+	}
+	if gotCustom != "yes" {
+		t.Errorf("X-Test = %q, want yes", gotCustom)
+	}
+	if resp.Text() != `{"ok":true}` {
+		t.Errorf("resp = %q", resp.Text())
+	}
+}
+
+func TestGetWithoutBodyIsUnchanged(t *testing.T) {
+	// 回归：加了 Body 字段后，不带 body 的 GET 不应出现请求体。
+	var hadBody bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > 0 {
+			hadBody = true
+		}
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+
+	c := mustClient(t, Options{QPS: -1})
+	defer c.Close()
+	if _, err := c.Get(context.Background(), srv.URL); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if hadBody {
+		t.Error("GET 请求不应带请求体")
 	}
 }
 

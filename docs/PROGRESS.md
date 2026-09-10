@@ -12,10 +12,29 @@
 - [x] `probe` — 漏洞点探测包：指纹→探测路径→内容匹配器 + 通用暴露面字典
 - [x] `jsaudit` — JS 收集（深度1爬取+sourcemap）+ 七类规则提取 + base64 解码
 - [x] `semantic` — LLM 语义层：OpenAI 兼容客户端，批量打分，可降级
-- [ ] `report` — JSON + HTML 报告
+- [x] `report` — JSON + HTML 报告
 - [ ] CLI 组装与联调
 
 ## 开发日志
+
+### 2026-09-10 — report 模块
+
+**report**（`pkg/report`，21 个测试）
+- 统一严重级别模型（critical/high/medium/low/info，中文展示），probe 与 jsaudit 的级别归一到此
+- 三种输出：
+  - 终端：严重=红底白字、高危=红、中危=黄；`Color=false`（NO_COLOR/重定向）时零 ANSI 转义；
+    接口路径只列前 20 条，其余提示见报告文件
+  - JSON：2 空格缩进 + 结尾换行，可回读（测试做了 round-trip）
+  - HTML：**完全自包含**（内联 CSS、无任何外部资源），用 `html/template` 自动转义
+- 汇总统计（目标成功/失败、各级别计数、请求数、耗时）与稳定排序（暴露面/JS 发现按严重度降序）
+- 报告可携带语义层结论（每个 JS 发现一条 `semantic`），未启用时标记为未判定
+
+**本模块修掉的真实缺陷：**
+
+1. **JSON 输出无限递归导致栈溢出**：方法名用了 `MarshalJSON`，使 `*Report` 实现了
+   `json.Marshaler`，而方法内部又调用 `json.MarshalIndent(r)` → 自我递归直到
+   `fatal error: stack overflow`。改名为 `JSONBytes()`（注释里留了原因，避免以后又改回去）
+2. 同时补了 httpx 的 POST 能力测试（`Body` 字段是我为 semantic 加的，回归确认 GET 不带请求体）
 
 ### 2026-09-10 — semantic 模块
 

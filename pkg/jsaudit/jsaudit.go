@@ -74,13 +74,14 @@ func (r *Report) Snippets() []Snippet {
 		if text == "" {
 			continue
 		}
-		out = append(out, Snippet{ID: snippetID(f), Text: text})
+		out = append(out, Snippet{ID: SnippetID(f), Text: text})
 	}
 	return out
 }
 
-// snippetID 生成 Finding 与语义层结果之间的稳定对应关系。
-func snippetID(f Finding) string {
+// SnippetID 生成 Finding 与语义层判定结果之间的稳定对应标识。
+// 报告层必须用同一函数取标识，否则语义结论无法对齐到发现。
+func SnippetID(f Finding) string {
 	return string(f.Category) + "|" + f.File + "|" + f.Value
 }
 
