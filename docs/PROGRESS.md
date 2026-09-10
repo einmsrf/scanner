@@ -13,9 +13,46 @@
 - [x] `jsaudit` — JS 收集（深度1爬取+sourcemap）+ 七类规则提取 + base64 解码
 - [x] `semantic` — LLM 语义层：OpenAI 兼容客户端，批量打分，可降级
 - [x] `report` — JSON + HTML 报告
-- [ ] CLI 组装与联调
+- [x] CLI 组装与联调
+
+> **十个模块全部完成，v0.1.0 可用。** 全量测试 `go test -count=3 ./...` 通过；
+> 本地无 gcc，`-race` 由 GitHub Actions CI 执行。
 
 ## 开发日志
+
+### 2026-09-10 — CLI 组装与联调（最后一个模块）
+
+**CLI**（`cmd/scanner`，14 个测试）
+- `main.go`：flag 解析、`-u`/`-l` 目标汇总与去重、配置文件与命令行的优先级合并
+  （用 `flag.Visit` 判断"显式设置过"才覆盖配置）、帮助与 `--version`
+- `scan.go`：单目标编排——协议探测 → 指纹（四层兜底）→ 404 基线 → 暴露面探测 →
+  JS 审计 →（语义层）→ 报告；目标级并发用带缓冲 channel 的 worker pool，
+  单目标用 `context.WithTimeout` 限制总耗时
+- `update.go`：`scanner update` **在内存中**下载并转换 GitHub zip（不落盘解包，
+  避开 Windows 上的中文文件名与长路径问题），也支持 `--source-dir` 离线转换；
+  产物被运行时优先加载，因此更新指纹库无需重编译
+- 报告输出：终端彩色（自动判断终端/`NO_COLOR`）、JSON、自包含 HTML；
+  `--json -` 支持输出到标准输出供管道消费
+- README：完整用法 + **数据外发风险提示**（设计第 8 节要求）+ 行为边界说明
+
+**联调中修掉的真实缺陷：**
+
+1. **HTML 报告因非法 UTF-8 而整个文件无法解码**。根因有两处：
+   ① `contextAround` / `Match` 按**字节**偏移切片，把一个多字节汉字切成半个；
+   ② `clip` 在"无需截断"时直接返回原串，没有把非法字节规整掉。
+   修复：切片按 UTF-8 字符边界对齐（`runeRange`），`clip` 统一返回 `string([]rune(s))`，
+   并在 `Report.Finalize` 里对所有字符串做一次合法化（U+FFFD 替换）+ HTML 输出兜底。
+   （目标站点大量使用 GBK，这个坑不修的话报告基本不可用。）
+2. **颜色在管道/重定向时仍然输出 ANSI 转义**。改为默认按"标准输出是否为终端 + 是否设置
+   `NO_COLOR`"决定，另加 `--no-color`/`--color` 强制开关。
+3. `--rate` 原本被配置校验钳制成正数，导致无法表达"不限速"；改为 `0` 取默认、负数表示不限速。
+
+**联调验证方式**（除单元测试外）：
+- 用本地 HTTP 服务搭了一个演示目标（含 nacos 页面、内联/外部 JS、`.git/HEAD`、`.env`、
+  JWT、Basic 头、内网 IP），跑真实二进制完整验证：七类发现全部命中，
+  Basic 头解出 `admin:abcd@1234`，JWT payload 解出 `role:root`，接口路径正确提取且**未被请求**
+- 用浏览器打开生成的 HTML 报告，DOM 检查确认：各区块齐全、17 个级别徽标、3 张表格、
+  **无横向溢出**、`externalResources` 为空且仅 1 个内联样式表（自包含成立）
 
 ### 2026-09-10 — report 模块
 

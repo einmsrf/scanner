@@ -49,12 +49,12 @@ func FromProbeFindings(findings []probe.Finding) []Exposure {
 	return out
 }
 
-// verdictFunc 返回某条 JS 发现的语义层判定，找不到时返回 nil。
-type verdictFunc func(id string) *SemanticNote
+// VerdictFunc 返回某条条目（JS 发现或接口路径）的语义层判定，找不到时返回 nil。
+type VerdictFunc func(id string) *SemanticNote
 
 // FromJSAudit 把 JS 审计结果转换成报告章节。
 // verdicts 可为 nil（语义层未启用），此时所有发现都标记为未判定。
-func FromJSAudit(rep *jsaudit.Report, verdicts verdictFunc) *JSSection {
+func FromJSAudit(rep *jsaudit.Report, verdicts VerdictFunc) *JSSection {
 	if rep == nil {
 		return nil
 	}
@@ -90,7 +90,11 @@ func FromJSAudit(rep *jsaudit.Report, verdicts verdictFunc) *JSSection {
 		sec.Findings = append(sec.Findings, jf)
 	}
 	for _, e := range rep.Endpoints {
-		sec.Endpoints = append(sec.Endpoints, JSEndpoint{Path: e.Path, Count: e.Count})
+		je := JSEndpoint{Path: e.Path, Count: e.Count}
+		if verdicts != nil {
+			je.Semantic = verdicts(EndpointID(e.Path))
+		}
+		sec.Endpoints = append(sec.Endpoints, je)
 	}
 	return sec
 }

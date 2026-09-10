@@ -163,6 +163,11 @@ func writeTarget(bw *errWriter, c *colorizer, t *TargetReport, opts TerminalOpti
 					bw.printf("      %s… 其余 %d 条见 JSON/HTML 报告%s\n", c.wrap(ansiDim), len(js.Endpoints)-20, c.wrap(ansiReset))
 					break
 				}
+				if e.Semantic != nil && e.Semantic.Judged && e.Semantic.IsSensitive {
+					bw.printf("      %s[!]%s %s %s高危接口: %s%s\n",
+						c.wrap(ansiRed), c.wrap(ansiReset), e.Path, c.wrap(ansiDim), truncate(e.Semantic.Reason, 60), c.wrap(ansiReset))
+					continue
+				}
 				bw.printf("      %s%s%s\n", c.wrap(ansiDim), e.Path, c.wrap(ansiReset))
 			}
 		}
@@ -235,14 +240,13 @@ func viaDisplay(via string) string {
 	}
 }
 
-// truncate 截断过长文本。
+// truncate 截断过长文本，并保证返回合法 UTF-8。
 func truncate(s string, n int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	r := []rune(s)
+	r := []rune(strings.Join(strings.Fields(s), " "))
 	if len(r) > n {
 		return string(r[:n]) + "…"
 	}
-	return s
+	return string(r)
 }
 
 // errWriter 记住首个写错误，避免每处都判错。

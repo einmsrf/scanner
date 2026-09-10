@@ -189,7 +189,8 @@ func (c *Config) Validate() error {
 	if c.Scan.Concurrency > MaxConcurrency {
 		c.Scan.Concurrency = MaxConcurrency
 	}
-	if c.Scan.QPS <= 0 {
+	// 0 表示未配置 → 用默认值；负数表示显式不限速（CLI 的 --rate -1）
+	if c.Scan.QPS == 0 {
 		c.Scan.QPS = DefaultQPS
 	}
 	if c.Scan.QPS > MaxQPS {

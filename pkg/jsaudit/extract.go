@@ -191,7 +191,7 @@ func buildFinding(cr compiledRule, value, code string, a Asset, matchStart, valS
 		File:     a.URL,
 		Source:   a.Source,
 		Line:     lineOf(code, matchStart),
-		Match:    clip(strings.TrimSpace(code[matchStart:min(matchStart+160, len(code))]), 160),
+		Match:    clip(strings.TrimSpace(runeRange(code, matchStart, matchStart+200)), 160),
 		Value:    clip(strings.TrimSpace(value), 160),
 		Entropy:  Entropy(value),
 		Note:     cr.spec.Hint,
@@ -362,24 +362,41 @@ func sortFindings(fs []Finding) {
 }
 
 // contextAround 返回敏感值前后各 n 个字符，压成单行。
+// 按 UTF-8 字符边界对齐，避免把多字节汉字切成半个导致报告里出现非法编码。
 func contextAround(code string, start, end, n int) string {
-	lo := start - n
+	return clip(runeRange(code, start-n, end+n), n*2+240)
+}
+
+// isContinuation 判断是否为 UTF-8 续字节。
+func isContinuation(b byte) bool { return b&0xC0 == 0x80 }
+
+// runeRange 返回 s[lo:hi]，并把两端收缩到 UTF-8 字符边界，
+// 保证结果一定是合法 UTF-8（目标站点常见 GBK/乱码字节，直接按字节切会切坏字符）。
+func runeRange(s string, lo, hi int) string {
 	if lo < 0 {
 		lo = 0
 	}
-	hi := end + n
-	if hi > len(code) {
-		hi = len(code)
+	if hi > len(s) {
+		hi = len(s)
 	}
-	return clip(code[lo:hi], n*2+240)
+	if lo >= hi {
+		return ""
+	}
+	for lo < hi && isContinuation(s[lo]) {
+		lo++
+	}
+	for hi > lo && isContinuation(s[hi-1]) {
+		hi--
+	}
+	return s[lo:hi]
 }
 
-// clip 压成单行并截断。
+// clip 压成单行并截断。始终返回合法 UTF-8：
+// []rune 转换会把非法字节规整为 U+FFFD，因此这里统一用 string(r) 而非原串。
 func clip(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	r := []rune(s)
+	r := []rune(strings.Join(strings.Fields(s), " "))
 	if len(r) > max {
 		return string(r[:max]) + "…"
 	}
-	return s
+	return string(r)
 }

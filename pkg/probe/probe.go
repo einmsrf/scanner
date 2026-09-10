@@ -260,14 +260,13 @@ func headerText(resp *httpx.Response) string {
 	return b.String()
 }
 
-// clip 截断证据串并压成单行。
+// clip 截断证据串并压成单行。始终返回合法 UTF-8（目标站点可能有非 UTF-8 字节）。
 func clip(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	r := []rune(s)
+	r := []rune(strings.Join(strings.Fields(s), " "))
 	if len(r) > evidenceMaxLen {
 		return string(r[:evidenceMaxLen]) + "…"
 	}
-	return s
+	return string(r)
 }
 
 // BodyHash 返回响应体的 sha256（供报告层做证据去重）。

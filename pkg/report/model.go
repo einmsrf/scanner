@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Severity 是统一的严重级别。probe 与 jsaudit 的级别字符串都归一到此。
@@ -113,10 +114,16 @@ type JSFinding struct {
 }
 
 // JSEndpoint 是从 JS 提取到的接口路径（只展示，绝不请求）。
+// Semantic 是语义层对"该接口是否像高危/高权限接口"的判定。
 type JSEndpoint struct {
-	Path  string `json:"path"`
-	Count int    `json:"count,omitempty"`
+	Path     string        `json:"path"`
+	Count    int           `json:"count,omitempty"`
+	Semantic *SemanticNote `json:"semantic,omitempty"`
 }
+
+// EndpointID 返回接口路径对应的语义层条目标识（构建与查询两侧共用，
+// 保证判定结果能对齐回具体接口）。
+func EndpointID(path string) string { return "endpoint|" + path }
 
 // JSSection 是单个目标的 JS 审计汇总。
 type JSSection struct {
@@ -228,7 +235,8 @@ func (s *Summary) CountSeverity(sev string) {
 	}
 }
 
-// Finalize 计算汇总统计并做稳定排序。
+// Finalize 计算汇总统计、规整字符串并做稳定排序。
+// 会在最后调用 Sanitize，保证后续三种输出（终端/JSON/HTML）都是合法 UTF-8。
 func (r *Report) Finalize(d time.Duration) {
 	s := Summary{Targets: len(r.Targets), Duration: d.Round(time.Millisecond).String()}
 	for _, t := range r.Targets {
@@ -274,4 +282,95 @@ func (r *Report) Finalize(d time.Duration) {
 		}
 	}
 	r.Summary = s
+	r.Sanitize()
+}
+
+// validUTF8 把非法 UTF-8 字节替换为 U+FFFD。
+// 目标站点常见 GBK 等非 UTF-8 编码，混进报告会让 JSON/HTML 整个文件损坏。
+func validUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "�")
+}
+
+// Sanitize 就地规整报告里的所有字符串为合法 UTF-8。
+// 这是唯一的收口点：三种输出都直接依赖这些字段。
+func (r *Report) Sanitize() {
+	r.Tool = validUTF8(r.Tool)
+	r.Version = validUTF8(r.Version)
+	r.GeneratedAt = validUTF8(r.GeneratedAt)
+	r.Fingerprints = validUTF8(r.Fingerprints)
+	r.Semantic = validUTF8(r.Semantic)
+	r.Args = validUTF8(r.Args)
+	r.Summary.Duration = validUTF8(r.Summary.Duration)
+
+	for _, t := range r.Targets {
+		if t == nil {
+			continue
+		}
+		t.Target = validUTF8(t.Target)
+		t.URL = validUTF8(t.URL)
+		t.Scheme = validUTF8(t.Scheme)
+		t.Title = validUTF8(t.Title)
+		t.Server = validUTF8(t.Server)
+		t.Error = validUTF8(t.Error)
+		t.Duration = validUTF8(t.Duration)
+		for i := range t.Notes {
+			t.Notes[i] = validUTF8(t.Notes[i])
+		}
+		for i := range t.Fingerprints {
+			f := &t.Fingerprints[i]
+			f.ID = validUTF8(f.ID)
+			f.Name = validUTF8(f.Name)
+			f.Product = validUTF8(f.Product)
+			f.Vendor = validUTF8(f.Vendor)
+			f.Path = validUTF8(f.Path)
+			f.URL = validUTF8(f.URL)
+			f.Via = validUTF8(f.Via)
+			f.Evidence = validUTF8(f.Evidence)
+		}
+		for i := range t.Exposures {
+			e := &t.Exposures[i]
+			e.Family = validUTF8(e.Family)
+			e.Name = validUTF8(e.Name)
+			e.Severity = validUTF8(e.Severity)
+			e.Path = validUTF8(e.Path)
+			e.URL = validUTF8(e.URL)
+			e.Evidence = validUTF8(e.Evidence)
+		}
+		if t.JS == nil {
+			continue
+		}
+		js := t.JS
+		for i := range js.Pages {
+			js.Pages[i] = validUTF8(js.Pages[i])
+		}
+		for i := range js.Notes {
+			js.Notes[i] = validUTF8(js.Notes[i])
+		}
+		for i := range js.Findings {
+			f := &js.Findings[i]
+			f.Category = validUTF8(f.Category)
+			f.CategoryKey = validUTF8(f.CategoryKey)
+			f.Severity = validUTF8(f.Severity)
+			f.RuleID = validUTF8(f.RuleID)
+			f.File = validUTF8(f.File)
+			f.Source = validUTF8(f.Source)
+			f.Value = validUTF8(f.Value)
+			f.Decoded = validUTF8(f.Decoded)
+			f.Evidence = validUTF8(f.Evidence)
+			f.Context = validUTF8(f.Context)
+			f.Note = validUTF8(f.Note)
+			if f.Semantic != nil {
+				f.Semantic.Reason = validUTF8(f.Semantic.Reason)
+			}
+		}
+		for i := range js.Endpoints {
+			js.Endpoints[i].Path = validUTF8(js.Endpoints[i].Path)
+			if e := js.Endpoints[i].Semantic; e != nil {
+				e.Reason = validUTF8(e.Reason)
+			}
+		}
+	}
 }

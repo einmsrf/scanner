@@ -205,6 +205,15 @@ springboot:
 - 目标级并发默认 10；单目标内部最多 3 并发；单目标 QPS ~5
 - `--rate` 参数可调；超时 10s/请求；单目标总耗时上限 3 分钟
 
+**实现要点（实测后补充）：**
+
+- 目标级并发用带缓冲 channel 的 worker pool 实现；**单目标内部为串行**（指纹 → 探测 → JS 审计），
+  天然满足"最多 3 并发"的上限，也避免同一目标的请求互相抢占预算
+- 单目标总耗时上限用 `context.WithTimeout` 实现，默认 3 分钟，`--target-timeout` 可调
+- 请求预算（默认 100/目标）由 httpx 统一扣减，**指纹、探测、JS 审计共用同一个客户端**，
+  因此三层叠加也不会越界；预算耗尽时各层都优雅停止并记录备注
+- `--rate -1` 表示不限速（配置文件里 `qps: -1` 同义）；`0` 表示未配置、取默认 5
+
 ## 10. 输出
 
 - 终端彩色输出（高危红色醒目标注）
@@ -214,9 +223,12 @@ springboot:
 **实现要点（实测后补充）：**
 
 - **统一严重级别**：`critical`/`high`/`medium`/`low`/`info`，中文展示为 严重/高危/中危/低危/信息；probe 的 `severity` 与 jsaudit 的级别都归一到这套取值，未知值按 `info` 处理
-- 终端配色：严重=红底白字、高危=红、中危=黄、低危=青、信息=灰。**颜色由调用方控制**：设置 `NO_COLOR` 或输出被重定向时关闭，避免日志里混入 ANSI 转义。接口路径在终端只列前 20 条，其余指向 JSON/HTML 报告
-- JSON：2 空格缩进 + 结尾换行，便于人工查看也便于管道；字段名稳定，便于下游工具依赖
+- 终端配色：严重=红底白字、高危=红、中危=黄、低危=青、信息=灰。**颜色自动判断**：标准输出不是终端（被管道/重定向）或设置了 `NO_COLOR` 时自动关闭，也可用 `--no-color`/`--color` 强制。接口路径在终端只列前 20 条，其余指向 JSON/HTML 报告
+- JSON：2 空格缩进 + 结尾换行，便于人工查看也便于管道；字段名稳定，便于下游工具依赖；`--json -` 可输出到标准输出供管道消费
 - HTML：**完全自包含**（CSS 全部内联，不引用任何外部资源），离线可打开；用 `html/template` 自动转义——证据字段直接来自目标站点的响应内容，必须转义，否则报告自身会变成 XSS 载体
+- **必须处理非 UTF-8 输入**：目标站点常见 GBK 等编码，混进字符串会让 JSON/HTML 整个文件损坏。
+  因此（a）所有截断/上下文切片按 UTF-8 字符边界对齐，（b）`Report.Finalize` 统一把全部字符串
+  规整为合法 UTF-8（U+FFFD 替换非法字节），（c）HTML 输出再做一次兜底校验
 - 报告内每个目标按"最严重级别"排序展示，暴露面与 JS 发现都按严重度降序排列
 - 输出文件默认写在项目目录内（`./reports/`），已加入 `.gitignore`
 
@@ -224,20 +236,30 @@ springboot:
 
 ```
 scanner/
-├── cmd/scanner/main.go      # CLI 薄壳（flag 解析）
+├── cmd/scanner/
+│   ├── main.go              # CLI 薄壳：flag 解析、帮助、配置合并、彩色开关
+│   ├── scan.go              # 扫描编排：协议探测→指纹→暴露面→JS审计→语义层→报告
+│   └── update.go            # scanner update：从 GitHub zip 或本地目录重转指纹库
 ├── pkg/
-│   ├── target/              # 目标解析：域名/IP:port → http+https 双协议探测
-│   ├── httpx/               # HTTP 客户端池：跟随重定向、跳过证书验证、限速、404 基线、代理
-│   ├── fingerprint/         # 指纹引擎：加载转换后的规则、子目录候选匹配
+│   ├── target/              # 目标解析：域名/IP:port → http+https 双协议探测、落地页、候选 base
+│   ├── httpx/               # HTTP 客户端池：跟随重定向、跳过证书验证、限速、请求预算、404 基线、代理
+│   ├── fingerprint/         # 指纹模型、md5+mmh3、四层兜底引擎、favicon/子目录抽取
 │   ├── convert/             # FingerprintHub nuclei YAML → 内部 JSON（服务 update 命令）
-│   ├── probe/               # 漏洞点探测包：指纹→探测路径→内容匹配器
-│   ├── jsaudit/             # JS 收集（深度1爬取+sourcemap）+ 七类规则提取 + base64 解码
+│   ├── probe/               # 漏洞点探测包：指纹→探测路径→内容匹配器 + 通用字典 + 基线过滤
+│   ├── jsaudit/             # JS 收集（深度1爬取+sourcemap）+ 七类规则提取 + base64/JWT 解码
 │   ├── semantic/            # LLM 接口：OpenAI 兼容客户端，批量打分，可降级
 │   ├── config/              # 配置文件加载与合并
-│   └── report/              # JSON + HTML 报告
-├── rules/                   # probe-packs.yaml、通用暴露面字典（go:embed）
+│   └── report/              # 统一级别模型 + 终端/JSON/HTML 三种输出
+├── rules/
+│   ├── probe-packs.yaml     # 按指纹族组织的探测包（含 __always__ 族）
+│   └── exposure.yaml        # 通用暴露面字典（20 条）
 ├── fingerprints.json        # 转换后的指纹库（go:embed）
+├── embed.go                 # 根包只放 go:embed 资源声明（embed 不能跨目录）
+├── version.go               # 版本号
 ├── docs/
 │   └── PROGRESS.md          # 开发进度文档（每次开发完成必须更新）
 └── config.yaml.example      # 配置文件示例
 ```
+
+- 本地临时目录 `.cache/` 已 gitignore：FingerprintHub 源码克隆、测试临时文件、本地演示目标
+- 报告默认输出到 `reports/`，同样已 gitignore

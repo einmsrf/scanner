@@ -1,9 +1,13 @@
 package report
 
 import (
+	"bytes"
 	"html/template"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode/utf8"
 )
 
 // WriteHTMLFile 输出自包含的 HTML 报告（人工研判用）。
@@ -28,7 +32,18 @@ func (r *Report) WriteHTML(w interface{ Write([]byte) (int, error) }) error {
 	if err != nil {
 		return err
 	}
-	return tmpl.Execute(w, r)
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, r); err != nil {
+		return err
+	}
+	// 兜底：目标站点可能返回非 UTF-8 字节（GBK 页面很常见），
+	// 一旦混入就会让整个 HTML 文件无法解码，这里统一规整为合法 UTF-8。
+	out := buf.String()
+	if !utf8.ValidString(out) {
+		out = strings.ToValidUTF8(out, "\uFFFD")
+	}
+	_, err = io.WriteString(w, out)
+	return err
 }
 
 var templateFuncs = template.FuncMap{
@@ -213,7 +228,7 @@ const htmlTemplate = `<!DOCTYPE html>
   {{if .Endpoints}}
   <h3>接口路径（{{len .Endpoints}}，仅展示不请求）</h3>
   <div>
-    {{range .Endpoints}}<span class="tag ep"><code>{{.Path}}</code>{{if gt .Count 1}} <span class="dim">×{{.Count}}</span>{{end}}</span>{{end}}
+    {{range .Endpoints}}<span class="tag ep">{{if .Semantic}}{{if .Semantic.Judged}}{{if .Semantic.IsSensitive}}<span class="badge sev-high" title="{{.Semantic.Reason}}">高危接口</span> {{end}}{{end}}{{end}}<code>{{.Path}}</code>{{if gt .Count 1}} <span class="dim">×{{.Count}}</span>{{end}}</span>{{end}}
   </div>
   {{end}}
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/einmsrf/scanner/pkg/fingerprint"
 	"github.com/einmsrf/scanner/pkg/jsaudit"
@@ -202,14 +203,20 @@ func TestFromJSAuditWithAndWithoutVerdicts(t *testing.T) {
 		t.Errorf("endpoints = %+v", sec.Endpoints)
 	}
 
-	// 带语义层：ID 必须与 jsaudit.SnippetID 对齐
-	wantID := jsaudit.SnippetID(js.Findings[0])
+	// 带语义层：查询 ID 必须与 jsaudit.SnippetID / report.EndpointID 对齐
+	wantSnippet := jsaudit.SnippetID(js.Findings[0])
+	wantEndpoint := EndpointID("/api/x")
+	queried := map[string]bool{}
 	sec2 := FromJSAudit(js, func(id string) *SemanticNote {
-		if id != wantID {
-			t.Errorf("查询 ID = %q, want %q（必须与 jsaudit 对齐）", id, wantID)
-		}
+		queried[id] = true
 		return &SemanticNote{Judged: true, IsSensitive: true, Reason: "r", Confidence: 0.9}
 	})
+	if !queried[wantSnippet] {
+		t.Errorf("未用 jsaudit.SnippetID 查询，实际查询 = %v, want 含 %q", queried, wantSnippet)
+	}
+	if !queried[wantEndpoint] {
+		t.Errorf("未用 report.EndpointID 查询接口，实际查询 = %v, want 含 %q", queried, wantEndpoint)
+	}
 	if sec2.Findings[0].Semantic == nil || !sec2.Findings[0].Semantic.IsSensitive {
 		t.Errorf("semantic = %+v", sec2.Findings[0].Semantic)
 	}
@@ -403,5 +410,94 @@ func TestReportWithoutFindings(t *testing.T) {
 	}
 	if !strings.Contains(hbuf.String(), "未命中任何指纹") {
 		t.Error("HTML 应说明未命中指纹")
+	}
+}
+
+func TestFromJSAuditAttachesEndpointVerdicts(t *testing.T) {
+	js := &jsaudit.Report{Endpoints: []jsaudit.Endpoint{{Path: "/api/admin/deleteAll", Count: 1}}}
+	wantID := EndpointID("/api/admin/deleteAll")
+	sec := FromJSAudit(js, func(id string) *SemanticNote {
+		if id != wantID {
+			t.Errorf("查询 ID = %q, want %q", id, wantID)
+		}
+		return &SemanticNote{Judged: true, IsSensitive: true, Reason: "删除类管理接口", Confidence: 0.9}
+	})
+	ep := sec.Endpoints[0]
+	if ep.Semantic == nil || !ep.Semantic.IsSensitive {
+		t.Fatalf("endpoint semantic = %+v", ep.Semantic)
+	}
+
+	// 终端与 HTML 都应标出高危接口
+	var buf bytes.Buffer
+	r := New("scanner", "0.1.0")
+	r.Targets = []*TargetReport{{Target: "https://x", Status: 200, JS: sec}}
+	r.Finalize(time.Second)
+	if err := r.WriteTerminal(&buf, TerminalOptions{}); err != nil {
+		t.Fatalf("WriteTerminal: %v", err)
+	}
+	if !strings.Contains(buf.String(), "高危接口") {
+		t.Error("终端未标出高危接口")
+	}
+	var hbuf bytes.Buffer
+	if err := r.WriteHTML(&hbuf); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	if !strings.Contains(hbuf.String(), "高危接口") {
+		t.Error("HTML 未标出高危接口")
+	}
+}
+
+// 目标站点常见非 UTF-8 字节（GBK 页面、乱码），报告必须仍然可读。
+func TestReportIsValidUTF8WithNonUTF8Input(t *testing.T) {
+	// 一个被切成半个的汉字 + 非法字节，模拟按字节截断的后果
+	bad := "测试"[:len("测试")-1] + "\xff\xfe" + "正常"
+	r := New("scanner", "0.1.0")
+	r.Targets = []*TargetReport{{
+		Target: "https://x",
+		Status: 200,
+		Title:  bad,
+		Server: bad,
+		Fingerprints: []FingerprintHit{
+			{ID: bad, Product: bad, Evidence: bad},
+		},
+		Exposures: []Exposure{{Name: bad, Severity: "high", Path: bad, Evidence: bad}},
+		JS: &JSSection{
+			Findings: []JSFinding{{
+				Category: bad, CategoryKey: "x", Severity: "high",
+				File: bad, Value: bad, Decoded: bad, Evidence: bad, Context: bad, Note: bad,
+			}},
+			Endpoints: []JSEndpoint{{Path: bad}},
+			Pages:     []string{bad},
+			Notes:     []string{bad},
+		},
+		Notes: []string{bad},
+	}}
+	r.Finalize(time.Second)
+
+	var hbuf bytes.Buffer
+	if err := r.WriteHTML(&hbuf); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	if !utf8.Valid(hbuf.Bytes()) {
+		t.Error("HTML 报告含非法 UTF-8 字节，整个文件将无法解码")
+	}
+
+	var jbuf bytes.Buffer
+	if err := r.WriteJSON(&jbuf); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	if !utf8.Valid(jbuf.Bytes()) {
+		t.Error("JSON 报告含非法 UTF-8 字节")
+	}
+	if !json.Valid(jbuf.Bytes()) {
+		t.Error("JSON 报告不是合法 JSON")
+	}
+
+	var tbuf bytes.Buffer
+	if err := r.WriteTerminal(&tbuf, TerminalOptions{}); err != nil {
+		t.Fatalf("WriteTerminal: %v", err)
+	}
+	if !utf8.Valid(tbuf.Bytes()) {
+		t.Error("终端输出含非法 UTF-8 字节")
 	}
 }
