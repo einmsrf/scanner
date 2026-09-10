@@ -61,13 +61,60 @@ func TestExtractJWTDecodesPayload(t *testing.T) {
 }
 
 func TestExtractPrivateKey(t *testing.T) {
-	f := find(t, "var k = `-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----`;", "private-key")
+	f := find(t, fakePrivateKeyCode(), "private-key")
 	if f == nil {
 		t.Fatal("未命中 private-key")
 	}
 	if f.Severity != SevHigh {
 		t.Errorf("Severity = %v, want high", f.Severity)
 	}
+}
+
+// 只含 PEM 头、没有 base64 主体的代码片段不是私钥——
+// 实测误报来自 jsencrypt 这类"拼接 PEM 文本"的库代码。
+func TestPrivateKeyRequiresRealBody(t *testing.T) {
+	header := "-----BEGIN " + "RSA PRIVATE KEY-----"
+	footer := "-----END " + "RSA PRIVATE KEY-----"
+
+	// 库代码形态：头字面量后面紧跟拼接代码，没有密钥正文
+	library := `var t="` + header + `\n";return t+=e.wordwrap(this.getPrivateBaseKeyB64())+"\n",` +
+		`t+"` + footer + `"`
+	if f := find(t, library, "private-key"); f != nil {
+		t.Errorf("生成 PEM 文本的库代码不应被判为私钥泄露: %+v", f)
+	}
+	// 只有头、紧接着无关代码
+	if f := find(t, `var h = "`+header+`"; doSomething();`, "private-key"); f != nil {
+		t.Error("无主体的 PEM 头不应被判为私钥")
+	}
+	// 带真实长度 base64 主体的私钥 → 应命中
+	if f := find(t, fakePrivateKeyCode(), "private-key"); f == nil {
+		t.Error("带真实 base64 主体的私钥应命中")
+	}
+}
+
+// 实测高危误报：`"type=1&username=" + userName + "&password=" + passWord + "&..."`
+// 会让 assign-password 捕获到 `+ passWord +`——那是代码片段，不是口令。
+func TestAssignmentRulesRejectCodeFragments(t *testing.T) {
+	code := `data: "type=1&username=" + userName + "&password=" + passWord + "&IsRememberUser=" + flag,`
+	if f := find(t, code, "assign-password"); f != nil {
+		t.Errorf("字符串拼接片段不应被判为硬编码口令: value=%q", f.Value)
+	}
+	if res := Extract([]Asset{codeAsset(code)}, ExtractOptions{}); res.Stats.FilteredCodeFragment == 0 {
+		t.Error("Stats.FilteredCodeFragment 应记录该过滤")
+	}
+	// 真实字面量仍要命中
+	if f := find(t, `var c={password:"Xk9#mQ2$vL7"};`, "assign-password"); f == nil {
+		t.Error("真实口令字面量应命中")
+	}
+}
+
+// fakePrivateKeyCode 合成一段"头 + 足够长的 base64 主体 + 尾"的 PEM。
+// 全部用拼接构造，避免源码里出现连续的完整 PEM 块（会被 push protection 拦截）。
+func fakePrivateKeyCode() string {
+	header := "-----BEGIN " + "RSA PRIVATE KEY-----"
+	footer := "-----END " + "RSA PRIVATE KEY-----"
+	body := strings.Repeat("QUJDRA==x\n", 20) // 明显是合成的占位 base64
+	return "var k = `" + header + "\n" + body + footer + "`;"
 }
 
 // 云厂商密钥的测试值用字符串拼接构造，避免被 GitHub Push Protection
@@ -136,7 +183,7 @@ func TestHighConfidenceRulesBypassPlaceholderFilter(t *testing.T) {
 		t.Fatal("未命中 aws-access-key-id（形态唯一，不应被占位符过滤）")
 	}
 	// ----BEGIN ... PRIVATE KEY----- 同理
-	if fk := find(t, "var k='-----BEGIN PRIVATE KEY-----';", "private-key"); fk == nil {
+	if fk := find(t, fakePrivateKeyCode(), "private-key"); fk == nil {
 		t.Error("未命中 private-key")
 	}
 	// Authorization: Basic 头同理
@@ -183,7 +230,7 @@ axios.post("/api/v1/orders?page=1");
 var css = "/static/app.css";
 var lib = "//cdn.example.com/lib.js";
 var img = "/images/logo.png";
-var esc = "\/\/api\/internal\/v2\/list";
+var esc = "\/\/cdn.example.com\/v2\/list";
 var abs = "https://api.example.com/v2/items";
 `
 	res := Extract([]Asset{codeAsset(code)}, ExtractOptions{})
@@ -200,11 +247,9 @@ var abs = "https://api.example.com/v2/items";
 	if _, ok := got["https://api.example.com/v2/items"]; !ok {
 		t.Errorf("缺少绝对 URL 接口，实际 = %v", got)
 	}
-	if _, ok := got["/api/internal/v2/list"]; !ok {
-		// 转义写法 \/\/api\/internal\/v2\/list 归一化后为 //api/internal/v2/list
-		if _, ok2 := got["//api/internal/v2/list"]; !ok2 {
-			t.Errorf("未处理转义双斜杠路径，实际 = %v", got)
-		}
+	// 转义写法 \/\/cdn.example.com\/v2\/list 归一化后是协议相对 URL，应保留
+	if _, ok := got["//cdn.example.com/v2/list"]; !ok {
+		t.Errorf("未处理转义双斜杠路径，实际 = %v", got)
 	}
 	for p := range got {
 		if strings.HasSuffix(p, ".css") || strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".png") {

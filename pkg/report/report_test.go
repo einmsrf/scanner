@@ -501,3 +501,83 @@ func TestReportIsValidUTF8WithNonUTF8Input(t *testing.T) {
 		t.Error("终端输出含非法 UTF-8 字节")
 	}
 }
+
+func TestSuspendedAndFailureRendering(t *testing.T) {
+	r := New("scanner", "0.1.0")
+	r.Targets = []*TargetReport{
+		{Target: "https://susp.example", Status: 200,
+			Suspended: true, SuspendedReason: "页面内容含「系统暂停访问」",
+			Notes: []string{"目标疑似暂停服务，本次结果不完整"}},
+		{Target: "https://t.example", Error: `dial tcp 1.2.3.4:443: i/o timeout`, FailureKind: "timeout"},
+		{Target: "https://t2.example", Error: `connectex: actively refused`, FailureKind: "timeout"},
+		{Target: "https://r.example", Error: `actively refused`, FailureKind: "refused"},
+	}
+	r.Finalize(time.Second)
+
+	if r.Summary.TargetsFailed != 3 {
+		t.Fatalf("TargetsFailed = %d, want 3", r.Summary.TargetsFailed)
+	}
+	if r.Summary.FailureReasons["timeout"] != 2 || r.Summary.FailureReasons["refused"] != 1 {
+		t.Errorf("FailureReasons = %v, want timeout×2 refused×1", r.Summary.FailureReasons)
+	}
+
+	var buf bytes.Buffer
+	if err := r.WriteTerminal(&buf, TerminalOptions{}); err != nil {
+		t.Fatalf("WriteTerminal: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"目标暂停服务，结果不完整", "失败原因", "[timeout]", "[refused]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("终端输出缺少 %q\n%s", want, out)
+		}
+	}
+	// 超时占 2/3 ≥ 60% → 应给出可操作提示
+	if !strings.Contains(out, "超时占多数") {
+		t.Errorf("超时占多数时应给出提示\n%s", out)
+	}
+
+	var hbuf bytes.Buffer
+	if err := r.WriteHTML(&hbuf); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	html := hbuf.String()
+	for _, want := range []string{"warn", "目标暂停服务，结果不完整", "失败原因分布"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("HTML 缺少 %q", want)
+		}
+	}
+
+	var jbuf bytes.Buffer
+	if err := r.WriteJSON(&jbuf); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	var back Report
+	if err := json.Unmarshal(jbuf.Bytes(), &back); err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if !back.Targets[0].Suspended || back.Targets[0].SuspendedReason == "" {
+		t.Errorf("JSON 未保留 suspended 字段: %+v", back.Targets[0])
+	}
+	if back.Targets[1].FailureKind != "timeout" {
+		t.Errorf("JSON failure_kind = %q, want timeout", back.Targets[1].FailureKind)
+	}
+	if back.Summary.FailureReasons["refused"] != 1 {
+		t.Errorf("JSON failure_reasons = %v", back.Summary.FailureReasons)
+	}
+}
+
+func TestNoFailureReasonsWhenAllOK(t *testing.T) {
+	r := New("scanner", "0.1.0")
+	r.Targets = []*TargetReport{{Target: "https://ok.example", Status: 200}}
+	r.Finalize(time.Second)
+	if len(r.Summary.FailureReasons) != 0 {
+		t.Errorf("全部成功时不应有失败原因分布: %v", r.Summary.FailureReasons)
+	}
+	var buf bytes.Buffer
+	if err := r.WriteTerminal(&buf, TerminalOptions{}); err != nil {
+		t.Fatalf("WriteTerminal: %v", err)
+	}
+	if strings.Contains(buf.String(), "失败原因") {
+		t.Error("全部成功时不应输出失败原因行")
+	}
+}

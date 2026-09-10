@@ -3,8 +3,16 @@ package report
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
+
+	"github.com/einmsrf/scanner/pkg/httpx"
 )
+
+// classDisplay 把失败大类翻译成中文说明。
+func classDisplay(kind string) string {
+	return httpx.ErrorClass(kind).Display()
+}
 
 // 终端 ANSI 颜色。高危用红底白字，保证在浅色/深色终端都醒目。
 const (
@@ -71,8 +79,16 @@ func writeTarget(bw *errWriter, c *colorizer, t *TargetReport, opts TerminalOpti
 	bw.printf("%s%s── %s%s\n", c.wrap(ansiBold), c.wrap(ansiBlue), t.Target, c.wrap(ansiReset))
 
 	if !t.OK() {
-		bw.printf("  %s✗ 扫描失败:%s %s\n\n", c.wrap(ansiRed), c.wrap(ansiReset), t.Error)
+		kind := ""
+		if t.FailureKind != "" {
+			kind = " [" + t.FailureKind + "]"
+		}
+		bw.printf("  %s✗ 扫描失败%s:%s %s\n\n", c.wrap(ansiRed), kind, c.wrap(ansiReset), t.Error)
 		return
+	}
+	// 暂停访问页的结果必然残缺，必须显眼提示，否则容易被误读成"目标没问题"
+	if t.Suspended {
+		bw.printf("  %s⚠ 目标暂停服务，结果不完整%s（%s）\n", c.wrap(ansiYellow), c.wrap(ansiReset), t.SuspendedReason)
 	}
 	status := fmt.Sprintf("HTTP %d", t.Status)
 	if t.Status >= 400 {
@@ -188,6 +204,25 @@ func writeSummary(bw *errWriter, c *colorizer, r *Report) {
 		s.Targets, s.TargetsOK, s.TargetsFailed, s.Requests, s.Duration)
 	bw.printf("  指纹命中 %d，暴露面 %d，JS 敏感信息 %d，接口路径 %d\n",
 		s.Fingerprints, s.Exposures, s.JSFindings, s.Endpoints)
+
+	// 失败原因分布：帮助判断是"目标真死"还是"出口被丢包/限速"
+	if len(s.FailureReasons) > 0 {
+		keys := make([]string, 0, len(s.FailureReasons))
+		for k := range s.FailureReasons {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s×%d", classDisplay(k), s.FailureReasons[k]))
+		}
+		bw.printf("  %s失败原因: %s%s\n", c.wrap(ansiDim), strings.Join(parts, "  "), c.wrap(ansiReset))
+		// 超时占多数时给出可操作的提示
+		if s.TargetsFailed > 0 && s.FailureReasons["timeout"]*10 >= s.TargetsFailed*6 {
+			bw.printf("  %s提示: 超时占多数，多为出口被丢包或防护设备限速；可降低 --concurrency 或稍后重试%s\n",
+				c.wrap(ansiDim), c.wrap(ansiReset))
+		}
+	}
 
 	// 级别统计：有值的才显示，严重的排前面
 	parts := []string{}

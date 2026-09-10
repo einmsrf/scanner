@@ -20,6 +20,40 @@
 
 ## 开发日志
 
+### 2026-09-10 晚 — 实战复盘修复（113 目标批量扫描后）
+
+处理了待办文档里 6 个"优先处理"项 + 复盘时新发现的 2 类高危误报。所有修复都有测试覆盖，
+其中端点/注释/vendor 过滤与两类误报的修复都用**真实扫描报告的数据**做了量化验证
+（`pkg/jsaudit/realdata_test.go`，报告缺失时自动跳过）。
+
+**改动清单**
+
+| 项 | 改动 | 实测效果 |
+|---|---|---|
+| 注释 URL 降噪 | 规则收紧为"只留同站/内网/公网 IP"，放弃域名黑名单 | 277 条 → 丢 268，降噪 **96.8%**，9 条有效信息全保留 |
+| vendor 文件 | 文件名或 license 头识别，只跑高危规则 | 压制 **256/350** 条发现（73.1%），vendor 内 1 条高危保住 |
+| 端点语法校验 | 定点黑名单（非白名单正则） | 907 → 剔除 61、保留 846，**124 条带 `:`/`*` 的 REST 路径全部保住** |
+| API 文档端点 | 8 条移入通用字典，上限 20→30，从 `__always__` 移除 | 修掉 yhtipipc.com 那类 SPA 站点的漏报路径 |
+| 接口前缀反哺 base | JS 审计提前到指纹/探测之前，前缀注入候选 base | 覆盖 nginx 反代前缀场景 |
+| 暂停访问页 | `target.DetectSuspended` + 报告三端标注 | 案例 180.101.238.250:19094 不再被误读成"没问题" |
+| 失败分类 | `httpx.ClassifyError` + `failure_reasons` 汇总 + `--retry` | 区分 62 超时 / 11 refused，只重试瞬时错误 |
+| 高危误报 ×2 | `looksLikeCodeFragment`、`hasPrivateKeyBody` | 真实报告里两条高危误报均被拦截（有测试证明） |
+
+**关键判断：两处推翻了待办文档里的原方案**（都以实测量化为依据）
+
+1. 注释 URL 原方案是"维护公共域名黑名单"。实测 277 条里第三方域名 269 条**全是**噪声，
+   有价值的是同站 1 条 + 内网 7 条——黑名单永远列不全，不如直接只留同站/内网。
+   降噪率从黑名单方案的 66.8% 提升到 96.8%，且没少任何有效信息。
+2. 端点校验原方案是白名单正则 `^/[a-zA-Z0-9_\-./?=&%]+$`。实测它会**误删 149 个合法端点**
+   （Harbor 的 `/namespaces/:tenantNamespace/tenants/:tenantName/pods`、
+   `/buckets/:bucketName/admin*`），而这些带路径参数/通配的接口恰恰是研判重点。
+   改为定点黑名单后，脏数据照删、合法路径一个不少。
+
+**失败率排查结论**：待办写的是"77 个 dial tcp 失败"，实际分类后是 **62 超时 + 11 refused
++ 1 TLS + 2 EOF + 1 DNS**。超时占八成，说明主因是**出口被丢包/防护设备限速**，
+不是目标真死——所以没有盲目加"对所有失败重试"，而是只重试超时/连接切断这两类瞬时错误，
+并在报告里给出"降低 --concurrency 或稍后重试"的提示。
+
 ### 2026-09-10 — CLI 组装与联调（最后一个模块）
 
 **CLI**（`cmd/scanner`，14 个测试）
@@ -223,29 +257,47 @@
 
 ## 下次开发待办
 
-### 实战扫描暴露的问题（2026-09-10 晚，113 目标批量扫描后，**优先处理**）
+### 实战扫描暴露的问题（2026-09-10 晚，113 目标批量扫描后）— **已全部处理**
 
-基于 `.cache/reports/scan-20260910-231347.json` 的分析结论：
+基于 `.cache/reports/scan-20260910-231347.json` 的分析结论与修复结果：
 
-- [ ] **jsaudit 降噪（最高优先）**：350 条 finding 中 332 条是 `comment-url` 噪音
-  （w3.org 命名空间、lodash/three.js license 头、图形学博客教程链接）。修复：
-  ① `comment-url` 只保留指向**目标同域/内网 IP/非常见公共后缀域名**的注释 URL，
-  维护公共域名黑名单（w3.org、github.com、npmjs、apache.org 等）直接丢弃；
-  ② vendor 文件（文件名含 `vendor`/`chunk-vendors` 或已知库 license 头）只跑高危规则
-  （硬编码凭证、AK/SK、私钥），跳过低危规则
-- [ ] **jsaudit 端点提取加语法校验**：1028 条端点中约 58 条脏数据（`GET`/`HEAD` 方法词、
-  `image/jpeg` 等 MIME 类型、`${e}`/`+t.url+` 模板残渣、`/`/`/./` 空路径）。修复：
-  路径须匹配 `^/[a-zA-Z0-9_\-./?=&%]+$` 且长度 ≥2，排除方法词/MIME/模板占位符
-- [ ] **API 文档端点提升为通用探测**：`/v2/api-docs`、`/api/v2/api-docs`、`/v3/api-docs`、
-  `/swagger-ui.html` 等放入通用暴露面字典，不再绑死 Spring 指纹
-  （漏报案例：yhtipipc.com 的 `/api/v2/api-docs`，SPA 落地页无 Spring 特征导致探测包未触发）
-- [ ] **JS 接口前缀反哺候选 base**：jsaudit 提取的端点中高频一级前缀（如 `/api`）
-  加入 probe/fingerprint 的候选 base，解决 nginx 反代前缀场景（同 yhtipipc 案例）
-- [ ] **暂停访问页识别**：目标重定向到 `offtime.html`/"系统暂停访问"这类页面时在报告中
-  标注"目标暂停服务，结果不完整"（案例：180.101.238.250:19094，夜间扫描只拿到暂停页，
-  真实业务 JS 未获取）
-- [ ] **失败率排查**：113 目标中 77 个 `dial tcp` 失败（68%），需甄别是真死还是
-  被防护设备封禁/限速（批量目标多为同网段 IP）
+- [x] **jsaudit 降噪（最高优先）**：350 条 finding 中 332 条是 `comment-url` 噪音。
+  **实测修正了原方案的判断**：对 277 条去重注释 URL 分类后发现，第三方域名 269 条
+  **全部**是库文档/规范/教程噪声，有价值的只有同站 1 条 + 内网 7 条。因此放弃了
+  "维护公共域名黑名单"（永远列不全），改为高精度规则：**注释 URL 只保留同站/内网/公网 IP**，
+  降噪率 **96.8%**（268/277 丢弃）且 9 条有效信息一条没少。
+  另加 vendor 规则（文件名或 license 头识别）：vendor 文件只跑高危规则，
+  实测压制 **256/350 = 73.1%** 的发现，同时保留了 vendor 内的 1 条高危
+- [x] **jsaudit 端点提取加语法校验**：**原方案的 `^/[a-zA-Z0-9_\-./?=&%]+$` 会误删
+  149 个合法端点**（Harbor 的 `/namespaces/:tenantNamespace/tenants/:tenantName/pods`、
+  `/buckets/:bucketName/admin*` 等带 REST 参数的路径），改为**定点黑名单**：
+  907 个去重端点剔除 61 个脏数据，保留 846 个（其中 124 个带 `:`/`*` 参数全部保住）
+- [x] **API 文档端点提升为通用探测**：`/v2/api-docs`、`/api/v2/api-docs`、`/v3/api-docs`、
+  `/api/v3/api-docs`、`/swagger-ui.html`、`/openapi.json` 等 8 条移入通用暴露面字典，
+  并从 `__always__` 族移除以免重复请求；字典上限由 20 放宽到 30（`MaxGenericEntries`）
+- [x] **JS 接口前缀反哺候选 base**：新增 `Report.BasePrefixCandidates`（出现 ≥3 次、
+  排除停用表、按次数取前 3），并把 pipeline 调整为 **JS 审计先于指纹/探测**，
+  使前缀能喂给两层候选 base；前缀全部来自目标自身 JS，不违反"不做目录爆破"
+- [x] **暂停访问页识别**：`target.DetectSuspended` 按 URL 特征（`offtime`/`maintenance`）
+  与页面文案（`系统暂停访问`、`网站维护中`、`under maintenance` 等，只看标题与正文前 8KB）判定；
+  报告中 JSON 带 `suspended` 字段、终端打印警告行、HTML 显示徽标
+- [x] **失败率排查**：实测 **62 个是超时、11 个 connection refused**（而非笼统的 77 个
+  `dial tcp`）。超时占八成说明主因是出口被丢包/限速而非目标真死，因此：
+  新增 `httpx.ClassifyError` 把失败分为 timeout/refused/dns/tls/eof/protocol/other，
+  报告新增 `failure_reasons` 分布并在超时占多数时给出可操作提示；
+  新增 `--retry <n>` **只对可重试的瞬时错误**（超时/连接被切断）重试并指数退避，
+  对 refused/DNS 不重试
+
+### 本轮额外发现并修掉的两类高危误报
+
+复盘真实报告时发现两条**高危**误报（危害大于低危噪声），已加针对性校验并用真实数据验证：
+
+- [x] `assign-password` 捕获到 `+ passWord +`：源头是
+  `"&password=" + passWord + "&IsRememberUser=" + ...` 这类 URL 拼接代码。
+  新增 `looksLikeCodeFragment`，取值含字符串拼接特征即丢弃
+- [x] `private-key` 命中 jsencrypt 的 `getPrivateKey()`：该函数把 PEM 头写成字面量、
+  后面紧跟 `wordwrap` 拼接代码，并非真实私钥——**任何使用 JS 加密库的站点都会误报高危**。
+  新增 `hasPrivateKeyBody`：PEM 头与 END 之间必须有 ≥100 个 base64 字符才判定
 
 ### 已验证完成（原待办项）
 

@@ -4,7 +4,9 @@
 # 规范化后的子串匹配（忽略大小写与 -/_/. 分隔符），命中该族才会跑对应探测项。
 #
 # 特殊键 `__always__`：不依赖指纹、对所有目标都跑的探测项，只放“价值高且请求极少”的
-# 路径（如 Spring Boot Actuator / Swagger），否则会吃掉请求预算。
+# 路径（Spring Boot Actuator 类），否则会吃掉请求预算。
+# 注：Swagger / api-docs 这类接口文档端点已移到 rules/exposure.yaml 的通用暴露面字典，
+# 避免两处重复请求（见 DESIGN.md 第 6 节“实战修订”）。
 #
 # 每条探测项必须有 matcher：只有返回体（或响应头）里出现该特征串才算命中，
 # 裸 200 一律不算命中（DESIGN.md 第 6 节）。matcher 默认按子串匹配，
@@ -29,19 +31,6 @@ __always__:
   matcher: route_id
   name: Spring Cloud Gateway 路由泄露
   severity: high
-- path: /swagger-ui.html
-  matcher: swagger
-  name: Swagger UI 未授权访问
-  severity: medium
-- path: /v2/api-docs
-  matcher: '"paths"'
-  name: Swagger v2 接口文档泄露
-  severity: medium
-- path: /v3/api-docs
-  matcher: openapi
-  name: OpenAPI v3 接口文档泄露
-  severity: medium
-
 spring:
 - path: /actuator/mappings
   matcher: mappings

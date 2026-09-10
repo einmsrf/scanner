@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/einmsrf/scanner/pkg/report"
 )
@@ -461,4 +462,209 @@ func TestUpdateFromRealCacheIfPresent(t *testing.T) {
 		t.Errorf("count = %d, want >= 3000", lib.Count)
 	}
 	t.Logf("真实指纹库转换结果: %d 条规则", lib.Count)
+}
+
+// 目标处于"暂停访问"状态时必须在报告里显著标注，否则使用者会把残缺结果误读成"没问题"。
+func TestRunScanDetectsSuspendedTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			// 根路径 302 到暂停页（真实场景：门户整体切到维护页）
+			http.Redirect(w, r, "/offtime.html", http.StatusFound)
+		case "/offtime.html":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "<html><body>offtime</body></html>")
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	dir := tmpDir(t)
+	jsonPath := filepath.Join(dir, "r.json")
+	var out, errBuf bytes.Buffer
+	code := run([]string{
+		"-u", srv.URL + "/offtime.html", "--rate", "-1", "--quiet",
+		"--out", filepath.Join(dir, "reports"),
+		"--json", jsonPath, "--no-js", "--no-probe", "--no-semantic",
+	}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("退出码 = %d, stderr: %s", code, errBuf.String())
+	}
+	data, _ := os.ReadFile(jsonPath)
+	var rep report.Report
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	tr := rep.Targets[0]
+	if !tr.Suspended {
+		t.Fatalf("未识别暂停访问页: %+v", tr)
+	}
+	if tr.SuspendedReason == "" {
+		t.Error("SuspendedReason 为空")
+	}
+	t.Logf("暂停页判定理由: %s", tr.SuspendedReason)
+}
+
+func TestRunScanSuspendedByContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><head><title>系统暂停访问</title></head><body><h1>系统维护中</h1></body></html>`)
+	}))
+	defer srv.Close()
+
+	dir := tmpDir(t)
+	jsonPath := filepath.Join(dir, "r.json")
+	var out, errBuf bytes.Buffer
+	if code := run([]string{
+		"-u", srv.URL, "--rate", "-1", "--quiet",
+		"--out", filepath.Join(dir, "reports"),
+		"--json", jsonPath, "--no-js", "--no-probe", "--no-semantic",
+	}, &out, &errBuf); code != 0 {
+		t.Fatalf("退出码 = %d, stderr: %s", code, errBuf.String())
+	}
+	data, _ := os.ReadFile(jsonPath)
+	var rep report.Report
+	json.Unmarshal(data, &rep)
+	if !rep.Targets[0].Suspended {
+		t.Errorf("未按页面文案识别暂停页: %+v", rep.Targets[0])
+	}
+}
+
+// 失败目标必须带上失败大类，便于判断是"目标真死"还是"出口被限速"。
+func TestRunScanClassifiesFailure(t *testing.T) {
+	dir := tmpDir(t)
+	jsonPath := filepath.Join(dir, "r.json")
+	var out, errBuf bytes.Buffer
+	// 端口 1 必然连接被拒
+	if code := run([]string{
+		"-u", "127.0.0.1:1", "--rate", "-1", "--timeout", "2s", "--quiet",
+		"--out", filepath.Join(dir, "reports"),
+		"--json", jsonPath, "--no-semantic",
+	}, &out, &errBuf); code != 0 {
+		t.Fatalf("退出码 = %d, stderr: %s", code, errBuf.String())
+	}
+	data, _ := os.ReadFile(jsonPath)
+	var rep report.Report
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if rep.Targets[0].FailureKind == "" {
+		t.Errorf("FailureKind 为空: %+v", rep.Targets[0])
+	}
+	if rep.Summary.FailureReasons[rep.Targets[0].FailureKind] == 0 {
+		t.Errorf("汇总未统计失败原因: %v", rep.Summary.FailureReasons)
+	}
+	t.Logf("失败分类: %s（%v）", rep.Targets[0].FailureKind, rep.Summary.FailureReasons)
+}
+
+// refused 不属于可重试错误，--retry 不应拖慢扫描。
+func TestRunScanDoesNotRetryRefused(t *testing.T) {
+	dir := tmpDir(t)
+	var out, errBuf bytes.Buffer
+	start := time.Now()
+	if code := run([]string{
+		"-u", "127.0.0.1:1", "--rate", "-1", "--timeout", "2s", "--retry", "3", "--quiet",
+		"--out", filepath.Join(dir, "reports"),
+		"--json", filepath.Join(dir, "r.json"), "--no-semantic",
+	}, &out, &errBuf); code != 0 {
+		t.Fatalf("退出码 = %d", code)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("连接被拒耗时 %v，--retry 不应对 refused 生效", elapsed)
+	}
+	if strings.Contains(errBuf.String(), "重试") {
+		t.Errorf("refused 不应触发重试，stderr = %s", errBuf.String())
+	}
+}
+
+// 超时属于可重试错误：--retry 1 应产生一次重试记录。
+func TestRunScanRetriesTimeout(t *testing.T) {
+	// 服务端故意慢于 --timeout，制造超时
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+		fmt.Fprint(w, "slow")
+	}))
+	defer srv.Close()
+
+	dir := tmpDir(t)
+	var out, errBuf bytes.Buffer
+	start := time.Now()
+	code := run([]string{
+		"-u", srv.URL, "--rate", "-1", "--timeout", "300ms", "--retry", "1",
+		"--target-timeout", "20s", "--quiet",
+		"--out", filepath.Join(dir, "reports"),
+		"--json", filepath.Join(dir, "r.json"), "--no-semantic",
+	}, &out, &errBuf)
+	elapsed := time.Since(start)
+	if code != 0 {
+		t.Fatalf("退出码 = %d, stderr: %s", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "重试") {
+		t.Errorf("超时应触发重试，stderr = %s", errBuf.String())
+	}
+	// 至少两次超时（初次 + 1 次重试）+ 退避
+	if elapsed < 600*time.Millisecond {
+		t.Errorf("耗时 %v，看不出重试发生", elapsed)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "r.json"))
+	var rep report.Report
+	json.Unmarshal(data, &rep)
+	if rep.Targets[0].FailureKind != "timeout" {
+		t.Errorf("FailureKind = %q, want timeout", rep.Targets[0].FailureKind)
+	}
+	t.Logf("耗时 %v，失败分类 %s", elapsed.Round(time.Millisecond), rep.Targets[0].FailureKind)
+}
+
+// JS 接口前缀应被反哺为候选 base（nginx 反代前缀场景）。
+func TestRunScanFeedsEndpointPrefixesIntoBases(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			fmt.Fprint(w, `<html><head><script src="/app.js"></script></head><body>app</body></html>`)
+			return
+		}
+		if r.URL.Path == "/app.js" {
+			// 大量 /api 前缀端点 → 应被聚合为候选 base
+			fmt.Fprint(w, `
+fetch("/api/v1/users"); fetch("/api/v1/orders"); fetch("/api/v2/items");
+fetch("/api/v2/audit"); fetch("/api/v3/report");
+`)
+			return
+		}
+		w.WriteHeader(404)
+		fmt.Fprint(w, "not found")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := tmpDir(t)
+	jsonPath := filepath.Join(dir, "r.json")
+	var out, errBuf bytes.Buffer
+	if code := run([]string{
+		"-u", srv.URL, "--rate", "-1", "--max-requests", "300", "--quiet",
+		"--out", filepath.Join(dir, "reports"),
+		"--json", jsonPath, "--no-semantic",
+	}, &out, &errBuf); code != 0 {
+		t.Fatalf("退出码 = %d, stderr: %s", code, errBuf.String())
+	}
+	data, _ := os.ReadFile(jsonPath)
+	var rep report.Report
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	tr := rep.Targets[0]
+	if tr.JS == nil {
+		t.Fatal("JS 审计结果为空")
+	}
+	var noted bool
+	for _, n := range tr.Notes {
+		if strings.Contains(n, "JS 接口前缀补充候选 base") && strings.Contains(n, "/api") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Errorf("未把 /api 前缀反哺为候选 base，Notes = %v", tr.Notes)
+	}
+	t.Logf("Notes 中的前缀反哺记录: %v", tr.Notes)
 }

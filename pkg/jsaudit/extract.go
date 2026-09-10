@@ -37,12 +37,16 @@ type Endpoint struct {
 
 // Stats 记录过滤情况，便于评估规则质量。
 type Stats struct {
-	RawMatches          int // 规则原始命中数
-	FilteredPlaceholder int // 因占位符被过滤
-	FilteredTooShort    int // 因长度不足被过滤
-	FilteredLowEntropy  int // 因熵值不足被过滤
-	DedupedFindings     int // 因重复被合并
-	TruncatedFindings   int // 因上限被截断
+	RawMatches              int            // 规则原始命中数
+	FilteredPlaceholder     int            // 因占位符被过滤
+	FilteredTooShort        int            // 因长度不足被过滤
+	FilteredLowEntropy      int            // 因熵值不足被过滤
+	DedupedFindings         int            // 因重复被合并
+	TruncatedFindings       int            // 因上限被截断
+	FilteredEndpoints       int            // 端点因脏数据被剔除
+	EndpointDropReasons     map[string]int // 端点剔除原因分布
+	FilteredCodeFragment    int            // 因"取值其实是 JS 代码片段"被过滤
+	FilteredFailedPostCheck int            // 因未通过命中后的语义校验被过滤
 }
 
 // ExtractOptions 控制提取行为。
@@ -86,9 +90,16 @@ func Extract(assets []Asset, opts ExtractOptions) *Result {
 		}
 		code := string(a.Code)
 
+		// vendor/库文件只跑高危规则：实测 350 条发现里 209 条来自库文件，
+		// 噪声远大于信息量（见 DESIGN.md 第 7.1 节实战修订）。
+		vendor := a.Source != "inline" && isVendorAsset(a.URL, code)
+
 		// 七类规则（注释类只作用于注释文本，由 extractComments 单独处理）
 		for _, cr := range compiledRules {
 			if cr.spec.Category == CatComment {
+				continue
+			}
+			if vendor && cr.spec.Severity != SevHigh {
 				continue
 			}
 			for _, loc := range cr.re.FindAllStringSubmatchIndex(code, -1) {
@@ -106,13 +117,17 @@ func Extract(assets []Asset, opts ExtractOptions) *Result {
 				}
 				value := code[valStart:valEnd]
 
-				f, ok := buildFinding(cr, value, code, a, matchStart, valStart, opts)
+				f, ok := buildFinding(cr, value, code, a, matchStart, valStart, valEnd, opts)
 				if !ok {
 					switch {
 					case len(value) < cr.spec.MinLen:
 						res.Stats.FilteredTooShort++
 					case !cr.spec.HighConfidence && IsPlaceholder(value):
 						res.Stats.FilteredPlaceholder++
+					case !cr.spec.HighConfidence && looksLikeCodeFragment(value):
+						res.Stats.FilteredCodeFragment++
+					case cr.spec.PostCheck != nil && !cr.spec.PostCheck(code, valEnd):
+						res.Stats.FilteredFailedPostCheck++
 					default:
 						res.Stats.FilteredLowEntropy++
 					}
@@ -132,19 +147,22 @@ func Extract(assets []Asset, opts ExtractOptions) *Result {
 			}
 		}
 
-		// 注释中的敏感信息（测试账号）+ 注释中的地址
-		for _, f := range extractComments(code, a, opts) {
-			key := fmt.Sprintf("%s|%s|%s", f.Category, f.File, f.Value)
-			if seen[key] {
-				res.Stats.DedupedFindings++
-				continue
+		// 注释中的敏感信息（测试账号）+ 注释中的地址。
+		// vendor 文件整段跳过：注释类全是低危，库文件里只会是 license/文档噪声
+		if !vendor {
+			for _, f := range extractComments(code, a, opts) {
+				key := fmt.Sprintf("%s|%s|%s", f.Category, f.File, f.Value)
+				if seen[key] {
+					res.Stats.DedupedFindings++
+					continue
+				}
+				seen[key] = true
+				if len(res.Findings) >= opts.MaxFindings {
+					res.Stats.TruncatedFindings++
+					continue
+				}
+				res.Findings = append(res.Findings, f)
 			}
-			seen[key] = true
-			if len(res.Findings) >= opts.MaxFindings {
-				res.Stats.TruncatedFindings++
-				continue
-			}
-			res.Findings = append(res.Findings, f)
 		}
 
 		// 接口路径（只提取，绝不请求）
@@ -158,6 +176,14 @@ func Extract(assets []Asset, opts ExtractOptions) *Result {
 					continue
 				}
 				seenHit[key] = true
+				if reason := EndpointDropReason(h.path); reason != "" {
+					res.Stats.FilteredEndpoints++
+					if res.Stats.EndpointDropReasons == nil {
+						res.Stats.EndpointDropReasons = map[string]int{}
+					}
+					res.Stats.EndpointDropReasons[reason]++
+					continue
+				}
 				endpointCount[h.path]++
 			}
 		}
@@ -170,14 +196,22 @@ func Extract(assets []Asset, opts ExtractOptions) *Result {
 
 // buildFinding 组装一条命中，含过滤判定与解码。
 //
-// 占位符过滤只作用于“靠键名/熵值猜测”的规则；AKIA…、-----BEGIN PRIVATE KEY-----、
+// 占位符过滤只作用于"靠键名/熵值猜测"的规则；AKIA…、-----BEGIN PRIVATE KEY-----、
 // JWT、Authorization 头这类形态唯一的规则不做占位符过滤——它们的形态本身就是证据，
 // 且真实值里也可能出现 example 之类的字样。
-func buildFinding(cr compiledRule, value, code string, a Asset, matchStart, valStart int, opts ExtractOptions) (*Finding, bool) {
+func buildFinding(cr compiledRule, value, code string, a Asset, matchStart, valStart, valEnd int, opts ExtractOptions) (*Finding, bool) {
 	if len(value) < cr.spec.MinLen {
 		return nil, false
 	}
 	if !cr.spec.HighConfidence && IsPlaceholder(value) {
+		return nil, false
+	}
+	// 捕获到的其实是 JS 代码片段（如 `+ passWord +`）而非字面量，属高危误报
+	if !cr.spec.HighConfidence && looksLikeCodeFragment(value) {
+		return nil, false
+	}
+	// 命中后的语义校验（如私钥必须带真实 base64 主体）
+	if cr.spec.PostCheck != nil && !cr.spec.PostCheck(code, valEnd) {
 		return nil, false
 	}
 	if e := cr.spec.minEntropy(); e > 0 && Entropy(value) < e {
@@ -222,7 +256,12 @@ func extractComments(code string, a Asset, opts ExtractOptions) []Finding {
 	var out []Finding
 	add := func(hit string, offset int, note, ruleID string) {
 		v := strings.TrimSpace(hit)
-		if v == "" || IsPlaceholder(v) {
+		if v == "" {
+			return
+		}
+		// 占位符过滤只针对"账号/口令"类取值；URL 不该走这条（否则域名里含
+		// example/sample 的正常地址会被误丢）
+		if ruleID != "comment-url" && IsPlaceholder(v) {
 			return
 		}
 		out = append(out, Finding{
@@ -240,22 +279,25 @@ func extractComments(code string, a Asset, opts ExtractOptions) []Finding {
 		})
 	}
 
+	pageHost := hostOf(a.URL)
 	for _, loc := range blockCommentRe.FindAllStringIndex(code, -1) {
 		body := code[loc[0]:loc[1]]
-		collectCommentHits(body, loc[0], code, add)
+		collectCommentHits(body, loc[0], code, pageHost, add)
 	}
 	for _, m := range lineCommentRe.FindAllStringSubmatchIndex(code, -1) {
 		if len(m) < 4 || m[2] < 0 {
 			continue
 		}
 		body := code[m[2]:m[3]]
-		collectCommentHits(body, m[2], code, add)
+		collectCommentHits(body, m[2], code, pageHost, add)
 	}
 	return out
 }
 
 // collectCommentHits 在单条注释文本里找敏感信息。
-func collectCommentHits(body string, base int, code string, add func(string, int, string, string)) {
+// pageHost 用于判断注释 URL 是否指向同域/内网——公共文档域名（w3.org 命名空间、
+// 库的 license 链接、教程博客）一律丢弃，实测这些占了 332/350 条发现。
+func collectCommentHits(body string, base int, code, pageHost string, add func(string, int, string, string)) {
 	for _, cr := range compiledRules {
 		if cr.spec.Category != CatComment {
 			continue
@@ -265,13 +307,13 @@ func collectCommentHits(body string, base int, code string, add func(string, int
 			add(hit, base+loc[0], cr.spec.Hint, cr.spec.ID)
 		}
 	}
-	// 注释里的地址（常为内部文档/后台地址）
+	// 注释里的地址：只留有研判价值的（同域 / 内网 / 非公共文档域名）
 	for _, loc := range commentURLRe.FindAllStringIndex(body, -1) {
 		u := body[loc[0]:loc[1]]
-		if isStaticURL(u) {
+		if isStaticURL(u) || !CommentURLRelevant(u, pageHost) {
 			continue
 		}
-		add(u, base+loc[0], "注释中的地址（可能是内部文档/后台入口）", "comment-url")
+		add(u, base+loc[0], "注释中的地址（同域/内网，可能是内部文档或后台入口）", "comment-url")
 	}
 }
 

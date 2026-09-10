@@ -23,6 +23,12 @@ const AlwaysFamily = "__always__"
 // MaxRecordedErrors 限制解析错误上报条数。
 const MaxRecordedErrors = 20
 
+// MaxGenericEntries 是通用暴露面字典的条数上限（DESIGN.md 第 6 节）。
+// 每条通用项都会对**每个目标**发一次请求，因此必须有硬上限以保住请求预算：
+// 指纹层约 15 次 + 通用字典 30 条 + 探测包 ≤24 条 ≈ 69，仍在单目标 100 的预算内。
+// 2026-09-10 实战后由 20 放宽到 30，用于纳入 API 文档端点（Swagger/api-docs）。
+const MaxGenericEntries = 30
+
 // Spec 是一条探测项。
 type Spec struct {
 	Path     string `yaml:"path"`
@@ -160,6 +166,10 @@ func ParseExposure(data []byte) ([]Spec, error) {
 			errs = errs[:MaxRecordedErrors]
 		}
 		return valid, fmt.Errorf("probe: exposure.yaml 有 %d 条无效探测项: %s", len(errs), strings.Join(errs, "; "))
+	}
+	if len(valid) > MaxGenericEntries {
+		return valid, fmt.Errorf("probe: 通用暴露面字典 %d 条，超过设计上限 %d 条（每条都会对每个目标发一次请求）",
+			len(valid), MaxGenericEntries)
 	}
 	return valid, nil
 }

@@ -109,7 +109,10 @@ type rule struct {
 	MinLen         int  // 敏感值最小长度
 	DecodeBase64   bool // 是否对敏感值做嵌套 base64 解码
 	DecodeJWT      bool // 是否按 JWT 解析 header/payload
-	Hint           string
+	// PostCheck 对"命中之后"做额外校验，用于排除形态相似但语义不符的误报。
+	// 参数为整段代码与本次匹配的结束偏移；返回 false 表示丢弃该命中。
+	PostCheck func(code string, matchEnd int) bool
+	Hint      string
 }
 
 // 占位符/示例值过滤 + 熵值门槛都通过的才算“疑似真实密钥”。
@@ -213,7 +216,8 @@ var rules = []rule{
 		ID: "private-key", Category: CatPrivateKey, Severity: SevHigh,
 		Re:         regexp.MustCompile(`(-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED |ENCRYPTED RSA )?PRIVATE KEY-----)`),
 		ValueGroup: 1, HighConfidence: true, MinLen: 10,
-		Hint: "私钥文件内容",
+		PostCheck: hasPrivateKeyBody,
+		Hint:      "私钥文件内容",
 	},
 
 	// ---------- 内网信息 ----------
@@ -237,6 +241,68 @@ var rules = []rule{
 		ValueGroup: 1, HighConfidence: true, MinLen: 2,
 		Hint: "注释中的测试/默认账号信息",
 	},
+}
+
+// hasPrivateKeyBody 校验 PEM 头之后确实带有足够长的 base64 主体。
+//
+// 为什么需要：负责"拼接 PEM 文本"的库代码同样含有这个头部字面量。
+// 实测案例是 jsencrypt 的 getPrivateKey()——它把 PEM 头写成一个字符串字面量，
+// 后面紧跟的是拼接代码（wordwrap 调用）而不是密钥正文。
+//
+// 这不是私钥，而是生成私钥文本的代码。若直接上报，任何使用 JS 加密库的站点都会
+// 得到一个"高危：私钥泄露"的误报。真实私钥在 BEGIN 与 END 之间有上千个 base64 字符，
+// 而库代码片段中间全是引号、括号、分号等非 base64 字符。
+func hasPrivateKeyBody(code string, matchEnd int) bool {
+	rest := code[matchEnd:]
+	body := rest
+	if i := strings.Index(rest, "-----END"); i >= 0 {
+		body = rest[:i]
+	} else if len(body) > 8192 {
+		body = body[:8192]
+	}
+	base64Chars := 0
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '+', c == '/', c == '=', c == '\r', c == '\n':
+			base64Chars++
+		}
+	}
+	return base64Chars >= 100
+}
+
+// looksLikeCodeFragment 判断捕获到的"值"其实是 JS 代码片段（字符串拼接 / 模板残渣），
+// 而不是真实字面量。
+//
+// 实测误报案例（113 目标扫描中的高危误报）：
+//
+//	"type=1&username=" + userName + "&password=" + passWord + "&IsRememberUser=" + ...
+//
+// assign-password 会捕获到 `+ passWord +`，这显然不是硬编码口令。
+// 只对"靠键名/熵值猜测"的规则生效——形态唯一的规则（AK 前缀、私钥、JWT、Authorization 头）
+// 自身已是证据，不受此影响。
+func looksLikeCodeFragment(v string) bool {
+	t := strings.TrimSpace(v)
+	if t == "" {
+		return true
+	}
+	if strings.HasPrefix(t, "+") || strings.HasSuffix(t, "+") {
+		return true
+	}
+	// JS 字符串拼接的特征：加号两侧带空格
+	if strings.Contains(t, " + ") || strings.Contains(t, "+ ") || strings.Contains(t, " +") {
+		return true
+	}
+	// 未转义引号残留
+	if strings.ContainsAny(t, "\"'`") {
+		return true
+	}
+	// 明显的表达式片段
+	if strings.ContainsAny(t, "(){}[];") {
+		return true
+	}
+	return false
 }
 
 // Compiled 便于测试与自检。

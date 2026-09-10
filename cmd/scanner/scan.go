@@ -267,9 +267,30 @@ func (a *app) scanTarget(ctx context.Context, tg target.Target) *report.TargetRe
 	}
 	defer client.Close()
 
-	sites, err := target.Probe(ctx, client, tg, a.opts.both)
-	if err != nil {
-		tr.Error = err.Error()
+	// 协议探测。只对瞬时错误（超时/连接被切断）重试——refused / DNS 失败
+	// 重试没有意义，见 DESIGN.md 第 9 节实战修订。
+	var (
+		sites    []*target.Site
+		probeErr error
+	)
+	for attempt := 0; ; attempt++ {
+		sites, probeErr = target.Probe(ctx, client, tg, a.opts.both)
+		if probeErr == nil || attempt >= a.opts.retry {
+			break
+		}
+		class := httpx.ClassifyError(probeErr)
+		if !class.Retryable() || client.Remaining() <= 0 {
+			break
+		}
+		backoff := retryBackoff(attempt)
+		if !sleepCtx(ctx, backoff) {
+			break // 上下文已取消/超时
+		}
+		a.noteRetry(tg, attempt+1, class)
+	}
+	if probeErr != nil {
+		tr.Error = probeErr.Error()
+		tr.FailureKind = string(httpx.ClassifyError(probeErr))
 		tr.Requests = client.Used()
 		return tr
 	}
@@ -306,13 +327,36 @@ func (a *app) scanSite(ctx context.Context, client *httpx.Client, site *target.S
 			site.BasePath, site.Landing.Status, site.RootLanding.URL))
 	}
 
-	// 指纹（四层兜底）
+	// 暂停访问页识别：这类页面的结果必然残缺，必须显著标注
+	if info := target.DetectSuspended(site.Landing); info.Suspended {
+		tr.Suspended = true
+		tr.SuspendedReason = info.Reason
+		tr.Notes = append(tr.Notes, "目标疑似暂停服务（"+info.Reason+"），本次结果不完整")
+	}
+
+	// 1) 先做 JS 审计：它只依赖已抓取的落地页，且能反哺候选 base。
+	//    顺序调整的背景见 DESIGN.md 第 5.2 节实战修订。
+	var jsRes *jsaudit.Report
+	if !a.opts.noJS {
+		jsRes = jsaudit.Run(ctx, client, site.Origin, site.Responses(), jsaudit.DefaultRunOptions())
+	}
+
+	// 2) 候选 base = 落地页推出的 + JS 接口前缀反哺的（应对 nginx 反代前缀场景）
+	bases := site.CandidateBases()
+	if jsRes != nil {
+		if extra := jsRes.BasePrefixCandidates(maxPrefixBases); len(extra) > 0 {
+			bases = appendUniqueBases(bases, extra)
+			tr.Notes = append(tr.Notes, fmt.Sprintf("由 JS 接口前缀补充候选 base: %s", strings.Join(extra, " ")))
+		}
+	}
+
+	// 3) 指纹（四层兜底）
 	var fpMatches []fingerprint.Match
 	fpRes, err := a.fpEngine.Scan(ctx, client, fingerprint.Input{
 		Origin:         site.Origin,
 		Root:           site.RootResponse(),
 		Pages:          site.Responses(),
-		BasePaths:      site.CandidateBases(),
+		BasePaths:      bases,
 		ManualBasePath: a.opts.basePath,
 	}, fingerprint.Options{})
 	if err != nil {
@@ -323,7 +367,7 @@ func (a *app) scanSite(ctx context.Context, client *httpx.Client, site *target.S
 		tr.Notes = append(tr.Notes, fpRes.Notes...)
 	}
 
-	// 暴露面探测（先取 404 基线过滤软 404）
+	// 4) 暴露面探测（先取 404 基线过滤软 404）
 	if !a.opts.noProbe {
 		var baseline *httpx.Baseline
 		if bl, berr := client.FetchBaselineAt(ctx, site.Origin); berr != nil {
@@ -333,15 +377,14 @@ func (a *app) scanSite(ctx context.Context, client *httpx.Client, site *target.S
 		}
 		pr := probe.New(a.probeLib)
 		pRes := pr.Run(ctx, client, site.Origin, fpMatches, baseline, probe.Options{
-			Bases: site.CandidateBases(),
+			Bases: bases,
 		})
 		tr.Exposures = report.FromProbeFindings(pRes.Findings)
 		tr.Notes = append(tr.Notes, pRes.Notes...)
 	}
 
-	// JS 审计
-	if !a.opts.noJS {
-		jsRes := jsaudit.Run(ctx, client, site.Origin, site.Responses(), jsaudit.DefaultRunOptions())
+	// 5) 收尾 JS 结果（含语义层）
+	if jsRes != nil {
 		var verdicts report.VerdictFunc
 		if a.semClient != nil {
 			verdicts = a.scoreSemantic(ctx, jsRes, tr)
@@ -478,4 +521,51 @@ func mergeJS(dst, src *report.JSSection) *report.JSSection {
 
 	dst.Notes = append(dst.Notes, src.Notes...)
 	return dst
+}
+
+// maxPrefixBases 是由 JS 接口前缀反哺的候选 base 数量上限。
+// 取 3 是为了在"覆盖反代前缀"与"不浪费请求预算"之间取平衡（DESIGN.md 第 5.2 节）。
+const maxPrefixBases = 3
+
+// appendUniqueBases 把 extra 里尚不存在的 base 追加到 bases。
+// 顺序保持"已有候选优先"，因此不会挤掉落地页推出的高优先级候选。
+func appendUniqueBases(bases, extra []string) []string {
+	seen := map[string]bool{}
+	for _, b := range bases {
+		seen[b] = true
+	}
+	for _, b := range extra {
+		if b == "" || seen[b] {
+			continue
+		}
+		seen[b] = true
+		bases = append(bases, b)
+	}
+	return bases
+}
+
+// retryBackoff 返回第 attempt 次重试前的等待时长（指数退避，上限 2s）。
+func retryBackoff(attempt int) time.Duration {
+	d := 300 * time.Millisecond << uint(attempt)
+	if d > 2*time.Second {
+		d = 2 * time.Second
+	}
+	return d
+}
+
+// sleepCtx 等待 d，若上下文先结束则返回 false。
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// noteRetry 在 stderr 打印一行重试提示（保持输出简洁，不逐目标刷屏过多）。
+func (a *app) noteRetry(tg target.Target, attempt int, class httpx.ErrorClass) {
+	fmt.Fprintf(a.stderr, "重试 %s（第 %d 次，原因 %s：%s）\n", tg.Raw, attempt, class, class.Display())
 }

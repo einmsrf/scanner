@@ -2,6 +2,8 @@ package jsaudit
 
 import (
 	"context"
+	"sort"
+	"strings"
 
 	"github.com/einmsrf/scanner/pkg/httpx"
 )
@@ -104,4 +106,91 @@ func (r *Report) HighestSeverity() Severity {
 		}
 	}
 	return best
+}
+
+// MinPrefixCount 是把某个一级前缀当作"部署 base"候选所需的最少出现次数。
+const MinPrefixCount = 3
+
+// prefixStoplist 是不适合作为部署 base 的一级前缀：静态资源目录、
+// 通用应用路由名（不是反代前缀）、以及各种噪声。
+var prefixStoplist = map[string]bool{
+	// 静态资源
+	"static": true, "assets": true, "asset": true, "js": true, "css": true,
+	"img": true, "images": true, "image": true, "fonts": true, "font": true,
+	"media": true, "public": true, "dist": true, "build": true, "chunks": true,
+	// 常见应用路由（做了也不会命中部署目录，白白消耗预算）
+	"home": true, "index": true, "login": true, "logout": true, "dashboard": true,
+	"property": true, "properties": true, "user": true, "users": true, "about": true,
+	"help": true, "error": true, "404": true, "404.html": true, "favicon.ico": true,
+	"video": true, "audio": true, "docs": true, "doc": true,
+}
+
+// BasePrefixCandidates 从提取到的接口路径里聚合一级前缀，返回适合当作
+// "部署 base"重试的前缀（如 nginx 反代前缀 /api），按出现次数降序、最多 max 个。
+//
+// 这是 DESIGN.md 第 5.2 节新增的第 5 层证据来源：实战里应用常挂在反代前缀下
+// （案例 yhtipipc.com 的 /api/v2/api-docs），而落地页 HTML 的链接看不到该前缀，
+// 原有四层兜底全部落空。
+//
+// 注意：前缀**全部来自目标自身 JS 里出现的路径**，不是内置猜测字典，
+// 因此不违反"不做目录爆破"的约束。
+func (r *Report) BasePrefixCandidates(max int) []string {
+	if r == nil || max <= 0 {
+		return nil
+	}
+	counts := map[string]int{}
+	for _, e := range r.Endpoints {
+		p := e.Path
+		if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") {
+			continue // 只看站内绝对路径
+		}
+		seg := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 2)[0]
+		if seg == "" || len(seg) < 2 {
+			continue
+		}
+		low := strings.ToLower(seg)
+		if prefixStoplist[low] {
+			continue
+		}
+		// 排除纯方法词（GET/POST...）与纯数字段
+		allUpper, allDigit := true, true
+		for _, ch := range seg {
+			if ch < 'A' || ch > 'Z' {
+				allUpper = false
+			}
+			if ch < '0' || ch > '9' {
+				allDigit = false
+			}
+		}
+		if allUpper || allDigit {
+			continue
+		}
+		counts["/"+seg]++
+	}
+
+	type kv struct {
+		path string
+		n    int
+	}
+	var list []kv
+	for p, n := range counts {
+		if n < MinPrefixCount {
+			continue
+		}
+		list = append(list, kv{p, n})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].n != list[j].n {
+			return list[i].n > list[j].n
+		}
+		return list[i].path < list[j].path
+	})
+	if len(list) > max {
+		list = list[:max]
+	}
+	out := make([]string, 0, len(list))
+	for _, e := range list {
+		out = append(out, e.path)
+	}
+	return out
 }

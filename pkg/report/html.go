@@ -107,6 +107,7 @@ const htmlTemplate = `<!DOCTYPE html>
   .sev-info     { background:var(--info); color:#fff; }
   .dim { color:var(--dim); }
   .err { color:var(--critical); }
+  .warn { color:var(--medium); font-weight:600; }
   .ok  { color:var(--ok); }
   .tag { display:inline-block; margin:0 6px 6px 0; padding:2px 9px; border-radius:12px;
          background:#22262f; border:1px solid var(--line); font-size:12px; }
@@ -139,6 +140,12 @@ const htmlTemplate = `<!DOCTYPE html>
     <div><div class="k">请求次数</div><div class="v">{{.Summary.Requests}}</div></div>
     <div><div class="k">耗时</div><div class="v">{{.Summary.Duration}}</div></div>
   </div>
+  {{if .Summary.FailureReasons}}
+  <h3>失败原因分布</h3>
+  <div>
+    {{range $k, $v := .Summary.FailureReasons}}<span class="tag">{{$k}} × {{$v}}</span>{{end}}
+  </div>
+  {{end}}
   <h3>级别统计</h3>
   <div>
     {{if .Summary.Critical}}<span class="badge sev-critical">严重 {{.Summary.Critical}}</span>{{end}}
@@ -153,8 +160,11 @@ const htmlTemplate = `<!DOCTYPE html>
 {{range .Targets}}
 <div class="panel">
   <h2>{{.Target}}</h2>
+  {{if .Suspended}}
+    <p class="warn">⚠ 目标暂停服务，结果不完整：{{.SuspendedReason}}</p>
+  {{end}}
   {{if not .OK}}
-    <p class="err">✗ 扫描失败：{{.Error}}</p>
+    <p class="err">✗ 扫描失败{{if .FailureKind}} <span class="badge sev-info">{{.FailureKind}}</span>{{end}}：{{.Error}}</p>
   {{else}}
   <div class="meta">
     {{if .URL}}<code>{{.URL}}</code>{{end}}

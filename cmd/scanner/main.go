@@ -55,6 +55,7 @@ type options struct {
 	proxy       string
 	maxRequests int
 	targetLimit time.Duration
+	retry       int
 
 	outDir   string
 	jsonPath string
@@ -93,6 +94,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.proxy, "proxy", "", "代理地址，如 http://127.0.0.1:7890（覆盖配置）")
 	fs.IntVar(&o.maxRequests, "max-requests", 0, "单目标请求预算上限（默认 100）")
 	fs.DurationVar(&o.targetLimit, "target-timeout", defaultTargetTimeout, "单目标总耗时上限")
+	fs.IntVar(&o.retry, "retry", 0, "对瞬时网络错误（超时/连接被切断）的重试次数，默认 0")
 	fs.StringVar(&o.outDir, "out", defaultOutDir, "报告输出目录")
 	fs.StringVar(&o.jsonPath, "json", "", "JSON 报告路径（- 表示输出到标准输出）")
 	fs.StringVar(&o.htmlPath, "html", "", "HTML 报告路径")

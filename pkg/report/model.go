@@ -147,6 +147,14 @@ type TargetReport struct {
 	Error    string `json:"error,omitempty"`
 	Duration string `json:"duration,omitempty"`
 
+	// Suspended 表示目标处于"暂停访问/维护中"状态——这类页面的扫描结果必然残缺，
+	// 必须在报告里显著标注，否则容易被误读成"目标没问题"（见 DESIGN.md 第 10 节）。
+	Suspended       bool   `json:"suspended,omitempty"`
+	SuspendedReason string `json:"suspended_reason,omitempty"`
+	// FailureKind 是网络失败大类（timeout/refused/dns/tls/eof/protocol/other），
+	// 用于区分"目标真死"与"出口被丢包/限速"。
+	FailureKind string `json:"failure_kind,omitempty"`
+
 	Fingerprints []FingerprintHit `json:"fingerprints,omitempty"`
 	Exposures    []Exposure       `json:"exposures,omitempty"`
 	JS           *JSSection       `json:"js,omitempty"`
@@ -196,6 +204,8 @@ type Summary struct {
 	Info          int    `json:"info"`
 	Requests      int    `json:"requests"`
 	Duration      string `json:"duration,omitempty"`
+	// FailureReasons 是失败目标按大类的分布，便于判断是否为出口/防护问题。
+	FailureReasons map[string]int `json:"failure_reasons,omitempty"`
 }
 
 // Report 是整份扫描报告。
@@ -244,6 +254,14 @@ func (r *Report) Finalize(d time.Duration) {
 			s.TargetsOK++
 		} else {
 			s.TargetsFailed++
+			kind := t.FailureKind
+			if kind == "" {
+				kind = "other"
+			}
+			if s.FailureReasons == nil {
+				s.FailureReasons = map[string]int{}
+			}
+			s.FailureReasons[kind]++
 		}
 		s.Requests += t.Requests
 		s.Fingerprints += len(t.Fingerprints)
@@ -316,6 +334,8 @@ func (r *Report) Sanitize() {
 		t.Server = validUTF8(t.Server)
 		t.Error = validUTF8(t.Error)
 		t.Duration = validUTF8(t.Duration)
+		t.SuspendedReason = validUTF8(t.SuspendedReason)
+		t.FailureKind = validUTF8(t.FailureKind)
 		for i := range t.Notes {
 			t.Notes[i] = validUTF8(t.Notes[i])
 		}

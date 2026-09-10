@@ -23,12 +23,12 @@ func TestRealRuleFilesParseAndValidate(t *testing.T) {
 		t.Fatalf("规则文件校验失败: %v", err)
 	}
 
-	// DESIGN.md 第 6 节：通用暴露面字典 ≤20 条。
+	// DESIGN.md 第 6 节：通用暴露面字典有条数上限（每条都对每个目标发请求）。
 	if len(lib.Generic) == 0 {
 		t.Error("通用暴露面字典为空")
 	}
-	if len(lib.Generic) > 20 {
-		t.Errorf("通用暴露面字典 %d 条，超过设计上限 20 条", len(lib.Generic))
+	if len(lib.Generic) > MaxGenericEntries {
+		t.Errorf("通用暴露面字典 %d 条，超过设计上限 %d 条", len(lib.Generic), MaxGenericEntries)
 	}
 	if len(lib.Always) == 0 {
 		t.Error("__always__ 族为空")

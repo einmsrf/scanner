@@ -88,3 +88,39 @@
   matcher: "Bud1"
   name: .DS_Store 目录结构泄露
   severity: low
+# --- API 文档端点（2026-09-10 实战补入）---
+# 原先放在 probe-packs 的 __always__ 族，但必须对所有目标生效：
+# 漏报案例 yhtipipc.com 的 /api/v2/api-docs —— SPA 落地页无任何 Spring 特征，
+# 导致 springboot 探测包压根没触发。这里同时覆盖 nginx 反代前缀变体（/api/...）。
+- path: /swagger-ui.html
+  matcher: "swagger"
+  name: Swagger UI 未授权访问
+  severity: medium
+- path: /swagger-ui/index.html
+  matcher: "swagger"
+  name: Swagger UI（新版路径）
+  severity: medium
+- path: /v2/api-docs
+  matcher: '"paths"'
+  name: Swagger v2 接口文档泄露
+  severity: medium
+- path: /api/v2/api-docs
+  matcher: '"paths"'
+  name: Swagger v2 接口文档泄露（/api 前缀）
+  severity: medium
+- path: /v3/api-docs
+  matcher: "openapi"
+  name: OpenAPI v3 接口文档泄露
+  severity: medium
+- path: /api/v3/api-docs
+  matcher: "openapi"
+  name: OpenAPI v3 接口文档泄露（/api 前缀）
+  severity: medium
+- path: /openapi.json
+  matcher: '"openapi"'
+  name: OpenAPI 描述文件泄露
+  severity: medium
+- path: /swagger-resources
+  matcher: "swagger"
+  name: Swagger 资源列表泄露
+  severity: low
