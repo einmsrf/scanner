@@ -223,8 +223,41 @@
 
 ## 下次开发待办
 
-- [ ] `probe`：`rules/probe-packs.yaml` 按指纹族组织探测路径（每条必须带内容匹配器），
-      通用暴露面字典 ≤20 条，用 httpx 的 `Baseline` 过滤软 404 误报
-- [ ] `rules/` 目录建好后，在根 `embed.go` 里补 `//go:embed rules/*.yaml`
-- [ ] `jsaudit`：JS 收集（深度 1 + `.js.map`）、七类规则、base64 最多嵌套 2 层解码、熵值 >4.0 才判疑似密钥
-- [ ] 后续 `semantic` / `report` / CLI 组装（含 `scanner update`：从 GitHub 拉取 zip 直接转换，不落盘解包）
+### 已验证完成（原待办项）
+
+十个模块全部实现，以下均已落地并有测试覆盖：
+
+- [x] `probe` 指纹族探测包 + 通用暴露面字典（20 条）+ 内容匹配器强制校验 + 基线过滤软 404
+- [x] 根 `embed.go` 嵌入 `fingerprints.json` 与 `rules/*.yaml`
+- [x] `jsaudit` JS 收集（深度 1 + `.js.map`）、七类规则、base64 最多嵌套 2 层
+- [x] `semantic` / `report` / CLI 组装（含 `scanner update`：拉取 zip 在内存中转换，不落盘解包）
+- [x] README 明示数据外发风险（设计第 8 节要求）
+
+### CI 验证
+
+每次 commit 推送后 `.github/workflows/ci.yml` 均通过（`windows-latest` 上
+`go vet` + `go test -race -count=1` + `go build`）。最近 6 个 commit 全绿，
+包括最新一次 CLI 组装：
+
+```
+712bd0b  completed  success   cli: CLI 组装 …
+492f8f7  completed  success   report: 统一严重级别模型 …
+f64a922  completed  success   semantic: OpenAI 兼容语义层 …
+071cc28  completed  success   jsaudit: JS 收集 …
+bbfe1c5  completed  success   probe: 指纹族探测包 …
+ef9ea30  completed  success   convert+fingerprint: FingerprintHub 模板转 JSON …
+```
+
+本机无 gcc，`-race` 只在 CI 执行，因此**改代码后必须确认 CI 绿**再认为完成。
+
+### 建议的后续增强（非阻塞）
+
+- [ ] `probe-packs.yaml` 的 matcher 目前是按产品文档整理的**最佳猜测**，建议对真实目标
+      逐个校准（尤其是 `harbor`/`jumpserver`/`minio` 等接口路径与返回特征）
+- [ ] 指纹库的 favicon 规则里 mmh3 与 md5 混用，若上游后续统一格式，`FaviconMatches`
+      可收敛为单一格式
+- [ ] `semantic` 目前串行为每个目标单独调用；目标很多时可考虑跨目标合并批次以省调用次数
+- [ ] JS 收集的深度 1 爬取只取同域链接，若目标把 JS 放在同域 CDN 之外会漏；可按需加白名单
+- [ ] HTML 报告可加"仅显示高危"的筛选开关（纯前端，无外部依赖）
+- [ ] 可考虑 `--resume`/结果缓存，避免重复扫描同一目标
+
