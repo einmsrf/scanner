@@ -223,6 +223,30 @@
 
 ## 下次开发待办
 
+### 实战扫描暴露的问题（2026-09-10 晚，113 目标批量扫描后，**优先处理**）
+
+基于 `.cache/reports/scan-20260910-231347.json` 的分析结论：
+
+- [ ] **jsaudit 降噪（最高优先）**：350 条 finding 中 332 条是 `comment-url` 噪音
+  （w3.org 命名空间、lodash/three.js license 头、图形学博客教程链接）。修复：
+  ① `comment-url` 只保留指向**目标同域/内网 IP/非常见公共后缀域名**的注释 URL，
+  维护公共域名黑名单（w3.org、github.com、npmjs、apache.org 等）直接丢弃；
+  ② vendor 文件（文件名含 `vendor`/`chunk-vendors` 或已知库 license 头）只跑高危规则
+  （硬编码凭证、AK/SK、私钥），跳过低危规则
+- [ ] **jsaudit 端点提取加语法校验**：1028 条端点中约 58 条脏数据（`GET`/`HEAD` 方法词、
+  `image/jpeg` 等 MIME 类型、`${e}`/`+t.url+` 模板残渣、`/`/`/./` 空路径）。修复：
+  路径须匹配 `^/[a-zA-Z0-9_\-./?=&%]+$` 且长度 ≥2，排除方法词/MIME/模板占位符
+- [ ] **API 文档端点提升为通用探测**：`/v2/api-docs`、`/api/v2/api-docs`、`/v3/api-docs`、
+  `/swagger-ui.html` 等放入通用暴露面字典，不再绑死 Spring 指纹
+  （漏报案例：yhtipipc.com 的 `/api/v2/api-docs`，SPA 落地页无 Spring 特征导致探测包未触发）
+- [ ] **JS 接口前缀反哺候选 base**：jsaudit 提取的端点中高频一级前缀（如 `/api`）
+  加入 probe/fingerprint 的候选 base，解决 nginx 反代前缀场景（同 yhtipipc 案例）
+- [ ] **暂停访问页识别**：目标重定向到 `offtime.html`/"系统暂停访问"这类页面时在报告中
+  标注"目标暂停服务，结果不完整"（案例：180.101.238.250:19094，夜间扫描只拿到暂停页，
+  真实业务 JS 未获取）
+- [ ] **失败率排查**：113 目标中 77 个 `dial tcp` 失败（68%），需甄别是真死还是
+  被防护设备封禁/限速（批量目标多为同网段 IP）
+
 ### 已验证完成（原待办项）
 
 十个模块全部实现，以下均已落地并有测试覆盖：
