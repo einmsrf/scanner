@@ -4,11 +4,11 @@
 
 ## 总体进度
 
-- [ ] `httpx` — HTTP 客户端池：跟随重定向、跳过证书验证、限速、404 基线、代理
-- [ ] `target` — 目标解析：域名/IP:port → http+https 双协议探测
-- [ ] `config` — 配置文件加载与合并
-- [ ] `convert` — FingerprintHub nuclei YAML → 内部 JSON（服务 update 命令）
-- [ ] `fingerprint` — 指纹引擎：规则加载、四层兜底匹配（重定向/路径无关/子目录候选/手动 base-path）
+- [x] `httpx` — HTTP 客户端池：跟随重定向、跳过证书验证、限速、404 基线、代理
+- [x] `target` — 目标解析：域名/IP:port → http+https 双协议探测
+- [x] `config` — 配置文件加载与合并
+- [x] `convert` — FingerprintHub nuclei YAML → 内部 JSON（服务 update 命令）
+- [x] `fingerprint` — 指纹引擎：规则加载、四层兜底匹配（重定向/路径无关/子目录候选/手动 base-path）
 - [ ] `probe` — 漏洞点探测包：指纹→探测路径→内容匹配器 + 通用暴露面字典
 - [ ] `jsaudit` — JS 收集（深度1爬取+sourcemap）+ 七类规则提取 + base64 解码
 - [ ] `semantic` — LLM 语义层：OpenAI 兼容客户端，批量打分，可降级
@@ -16,6 +16,55 @@
 - [ ] CLI 组装与联调
 
 ## 开发日志
+
+### 2026-09-10 — httpx / target / config / convert / fingerprint 五个模块
+
+按 DESIGN.md 第 2.2 节顺序实现，每个模块一次 commit 并 push。测试全部通过
+（`go test -count=3 ./...` 全绿；本机无 gcc，`-race` 交由 CI）。
+
+**httpx**（`pkg/httpx`）
+- `Client`：跟随重定向并记录跳转链与最终 URL、默认跳过 TLS 证书校验、均匀间隔限速器（并发安全）、
+  请求预算（默认 100/目标，`ErrBudgetExceeded`）、响应体读取上限与截断标记
+- 代理：配置里的 `proxy` 优先，为空回退 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量
+- `Baseline`：随机路径取 404 基线，`SameAs()` 用「状态码 + 归一化 body 哈希」判定，
+  通配 200（软 404）站点再用「同 Content-Type + 长度 3% 容差」兜底
+- 响应同时保留原始字节（供 favicon 哈希）与文本
+
+**target**（`pkg/target`）
+- 解析 `域名` / `IP` / `IP:端口` / `域名:端口` / 完整 URL（路径作 base-path 提示）/ `#` 注释 / 空行，
+  支持 IPv6 字面量与 `user:pass@host`，按 Key 去重并返回非法行列表
+- 协议策略：https 优先 http 兜底；`--both` 时两个协议各自探活
+- `Probe` 返回 `Site`（落地页、最终路径、候选 base）；base-path 404 时自动补取站点根
+- 发现并处理：TLS-only 端口收到明文请求会返回 400（各服务端有固定文案），
+  按“该协议未提供服务”处理，避免把 https 站点误报成 http 可用
+
+**config**（`pkg/config`）
+- 查找顺序：`--config` > 当前目录 `config.yaml` > 可执行文件同目录 `config.yaml`；缺失即用默认值
+- 自定义 `Duration` 支持 `30s` 与裸数字（按秒）；`KnownFields(true)` 让拼错的字段名直接报错
+- 默认值填充 + 取值范围钳制；`SemanticEnabled()`（无 api_key 自动关闭语义层）、`MaskedAPIKey()` 脱敏
+- 新增 `config.yaml.example`（内容与 `config.Example()` 同源）
+
+**convert**（`pkg/convert`）
+- 从 `fs.FS` 读取（磁盘目录或 zip 均可，为 `scanner update` 直接从压缩包转换铺路）
+- 只保留 path + word/regex/favicon；含 `dsl`/`status`/`size`/`extractors` 的 matcher 丢弃并计入 `Stats`
+- 重复 ID 加 `#N` 后缀**全部保留**（上游 73 个 ID 被复用），按 ID 排序保证产物可复现
+- 实测上游 3371 个模板 → **3373 条规则、0 解析失败、0 matcher 丢弃**，产物 `fingerprints.json` 约 960KB
+- 交叉核对：word 3032 / regex 475 / favicon 281，与上游原始计数完全一致
+  （唯一差值的 1 个 `type: regex` 位于 `extractors` 里，不是 matcher）
+
+**fingerprint**（`pkg/fingerprint`）
+- `Library`/`Rule`/`Matcher` 数据模型 + `Load`（磁盘 `fingerprints.json` 优先，缺失回退 go:embed，
+  因此 `scanner update` 后无需重编译）
+- mmh3（MurmurHash3 x86_32）纯 Go 实现，参考值由 Python `mmh3` 库交叉验证
+  （`hello`→613153351、`foo`→-156908512 等 7 组向量 + md5 向量）
+- favicon 匹配同时支持 md5 与 mmh3（有符号十进制 / 有符号十六进制 / 无符号十六进制）
+- `NewEngine` 预编译全部正则并建索引（根路径规则、favicon 规则、路径→规则），
+  无效正则的规则整条剔除并计入 `RegexSkipped`
+- `Scan` 实现四层兜底：① 根路径重定向后的落地页 ② 路径无关 body/header 关键字与 favicon
+  （`<link rel="icon">` 真实位置，失败回退 `/favicon.ico`）③ 候选子目录 base × 规则路径
+  ④ `--base-path` 手动指定；按规则 ID 去重并按产品名排序
+- 真实指纹库集成测试 6 项：规模与 matcher 组成、索引正确性、nacos 端到端、
+  子目录 base 兜底、非根路径规则（etcd `/version`）、`and` 条件不部分命中
 
 ### 2026-09-10 — 环境更新与 CI 接入
 
@@ -30,3 +79,34 @@
 - 保留：DESIGN.md（设计定稿，仍是开发唯一依据）、README.md、.gitignore、本文档
 - 当前进度：零代码，从第一个模块重新开始
 - 待办：按 DESIGN.md 第 2.2 节顺序开工，第一步实现 `httpx`
+
+## 遇到的问题及解决方式
+
+1. **DESIGN.md 写的 favicon 是 mmh3，上游实际用 md5**
+   实测 FingerprintHub 的 281 条 favicon matcher 里绝大多数是 32 位十六进制 md5，
+   仅个别规则（如 xxl-job）用 mmh3 十进制。解决：两种都支持，按哈希串形态自动判别。
+   已回写 DESIGN.md 第 5.2 节。（mmh3 实现用 Python `mmh3` 库做了 7 组参考向量验证。）
+
+2. **上游 73 个规则 ID 被多个模板复用**
+   最初按 ID 去重会丢掉约 51 条规则。改为加 `#N` 后缀全部保留，产物 3373 条与模板数吻合。
+
+3. **TLS-only 端口对明文请求返回 400，被误判为 http 可用**
+   加了针对性的 400 文案识别（Go/nginx 的固定提示），按协议不可用处理。
+
+4. **`MatchRootRules bool` 零值语义反了**（默认 false 导致根规则全不匹配）
+   改为反向字段 `SkipRootMatch`，零值即“要匹配”。
+
+5. **规则 `paths: ["/", "/nacos/"]` 时 `/` 未被匹配**
+   原来只有“纯根路径”规则才进 rootIdx，导致含 `/` 的多路径规则白丢一次免费匹配。
+   改为：paths 中出现 `/` 即加入 rootIdx，其余非根路径另行探测。
+
+6. **父级路径为 `.cache/` 时 go 工具忽略该目录**
+   临时转换工具改用 `tools/genfp`（用完即删），`.cache/` 只放 FingerprintHub 源码克隆（已 gitignore）。
+
+## 下次开发待办
+
+- [ ] `probe`：`rules/probe-packs.yaml` 按指纹族组织探测路径（每条必须带内容匹配器），
+      通用暴露面字典 ≤20 条，用 httpx 的 `Baseline` 过滤软 404 误报
+- [ ] `rules/` 目录建好后，在根 `embed.go` 里补 `//go:embed rules/*.yaml`
+- [ ] `jsaudit`：JS 收集（深度 1 + `.js.map`）、七类规则、base64 最多嵌套 2 层解码、熵值 >4.0 才判疑似密钥
+- [ ] 后续 `semantic` / `report` / CLI 组装（含 `scanner update`：从 GitHub 拉取 zip 直接转换，不落盘解包）

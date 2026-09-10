@@ -87,18 +87,33 @@ scan:
 ### 5.1 指纹库
 
 - 复用 [FingerprintHub](https://github.com/0x727/FingerprintHub)
-- 写离线转换器（`pkg/convert`）：nuclei YAML 模板子集（path + word/regex/status/favicon-hash matcher）→ 紧凑 JSON，`go:embed` 进二进制。DSL 表达式等复杂规则直接丢弃
+- 写离线转换器（`pkg/convert`）：nuclei YAML 模板子集 → 紧凑 JSON，`go:embed` 进二进制。DSL 表达式等复杂规则直接丢弃
 - `scanner update` 命令：从 GitHub 拉取 FingerprintHub 最新版本重新转换（网络不通时走配置文件的 proxy）
+
+**上游实际情况（2026-09-10 核对，commit `eb8bcacd`，实测数据，实现以实际为准）：**
+
+- 模板位于仓库的 `web-fingerprint/` 目录，共 3371 个 YAML 文件；转换后 3373 条规则（有 2 个模板含多个 `http` 块）
+- matcher 类型只有三种：`word`（3032）、`regex`（476，其中 1 个属于 `extractors` 不算 matcher）、`favicon`（281）。**上游不存在 `status` matcher，也没有 DSL**，所以“丢弃复杂规则”实际只作用于个别含 `extractors` 的模板
+- 73 个 ID 被多个模板复用（同产品不同入口），转换时**全部保留并加 `#N` 后缀**去重，避免丢失探测能力
+- 每条模板的 `condition: and` 是**单个 matcher 内部**多项之间的关系（默认 `or`）；上游不出现 `matchers-condition`，故 matcher 之间按 nuclei 默认的 `or` 处理
+- 上游正则可 100% 编译，无丢弃
 
 ### 5.2 匹配策略（四层兜底，应对部署目录被修改）
 
 1. **重定向跟随**：根路径 302 到真实入口（`/ → /oa/login.do`），对落地页匹配
-2. **路径无关规则**：body 关键字、header、favicon mmh3 hash（favicon 同时解析 `<link rel="icon">` 拿真实位置，不只用 `/favicon.ico`）
+2. **路径无关规则**：body 关键字、header、favicon 哈希（favicon 同时解析 `<link rel="icon">` 拿真实位置，不只用 `/favicon.ico`）
 3. **子目录候选**：从落地页 HTML/JS 提取站内一级目录，按出现频率取 Top 5，把路径型规则的 base 从 `/` 换成候选目录重新拼接
 4. **手动指定**：`--base-path` 参数
 
 - 不做目录爆破（不内置 `/oa` `/system` 等猜测字典）
 - 单目标请求预算硬上限 ~100 个
+
+**实现要点（实测后补充，见 5.1 的核对结论）：**
+
+- **favicon 哈希同时支持两种写法**：上游 281 条 favicon matcher 里绝大多数是 **md5**（32 位十六进制），个别是 **mmh3**（如 xxl-job 用十进制 `1691956220`）。匹配时按哈希串形态自动判别，并兼容 mmh3 的有符号十进制、有符号十六进制、无符号十六进制三种写法
+- **第 3 层主要作用于根路径型规则**：上游 3370/3373 条规则路径都是 `{{BaseURL}}/`，所以“换 base 重拼”实际是拿候选子目录（如 `/app`）去请求 `origin/app/`，再用**根路径型规则**匹配该页面。这是“部署目录被修改”（应用挂在 `/app` 而根路径只是个门户页）场景下的主要兜底手段
+- 含 `{{RootURL}}`、`{{Hostname}}` 等无法静态化变量的 path 一律丢弃（上游几乎不用）
+- 引擎自身开销上限：子目录候选 ≤5、候选 base 探测 ≤8、非根路径探测 ≤60，且受 httpx 的单目标总预算约束
 
 ## 6. 漏洞点探测（仅判活，不发任何 payload）
 

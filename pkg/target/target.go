@@ -284,6 +284,15 @@ func (s *Site) Responses() []*httpx.Response {
 	return out
 }
 
+// RootResponse 返回“请求站点根 origin/ 得到”的响应；未知时返回 nil。
+// 指纹引擎的路径无关规则与 favicon 均以它为准（DESIGN.md 第 5.2 节第 1 层）。
+func (s *Site) RootResponse() *httpx.Response {
+	if s.BasePath == "" {
+		return s.Landing
+	}
+	return s.RootLanding
+}
+
 // CandidateBases 返回路径型规则可尝试的 base 前缀（按优先级去重）：
 // 落地页所在目录 → 请求的 base-path → 站点根。
 // 这是 DESIGN.md 第 5.2 节第 1、4 层兜底的基础。
