@@ -17,6 +17,13 @@
 
 ## 开发日志
 
+### 2026-09-10 — 环境更新与 CI 接入
+
+- Go 已重装为 `go1.27.1 windows/amd64`（`C:\Program Files\Go`），原 32 位卸载，全局 env 无残留配置
+- 本机仍无 gcc：新增 GitHub Actions CI（`.github/workflows/ci.yml`），push/PR 到 main 自动在 windows-latest 跑 `go vet` + `go test -race` + `go build`；本地继续 `-count=3` 方案
+- DESIGN.md 新增第 2.4 节"开发环境与测试"，merge 前 CI 必须全绿
+- 待办不变：按 DESIGN.md 第 2.2 节顺序从 `httpx` 开始实现
+
 ### 2026-09-10 — 项目重置，重新开发
 
 - 应使用者要求清除上一轮全部开发成果：代码（`pkg/`、`go.mod`、`go.sum`）、git 历史、远程 tag 已全部清空

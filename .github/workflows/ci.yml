@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          check-latest: true
+
+      # windows-latest 自带 mingw-w64 gcc，CGO 默认可用，-race 可运行
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race -count=1 ./...
+
+      - name: go build
+        run: go build ./...

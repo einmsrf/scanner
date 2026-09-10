@@ -45,6 +45,13 @@ Go 编写的单文件 CLI 工具：输入域名/IP(:port)，自动补全 http/ht
   - Go（仅当前会话环境变量）：`export GOPROXY=https://goproxy.cn,direct`（国内镜像优先），必要时 `export HTTPS_PROXY=http://127.0.0.1:7890`
   - 程序本身的 HTTP 客户端：支持 `HTTPS_PROXY` 环境变量和配置文件中的 `proxy` 字段
 
+### 2.4 开发环境与测试
+
+- **本机 Go**：`go1.27.1 windows/amd64`，位于 `C:\Program Files\Go`（2026-09-10 重装为 64 位，原 32 位已卸载）。注意：旧的 shell 会话 PATH 可能未刷新，找不到 `go` 时用绝对路径 `C:\Program Files\Go\bin\go.exe`
+- **竞态检测**：本机无 gcc，`go test -race` 无法在本地运行。统一由 GitHub Actions CI 执行（`.github/workflows/ci.yml`，windows-latest 自带 mingw-w64 gcc）：每次 push/PR 到 main 自动跑 `go vet`、`go test -race -count=1 ./...`、`go build ./...`
+- **本地测试**：`go test -count=3 ./...` 重复跑 + 人工复核共享状态，是 CI 竞态检测的补充而非替代；**merge 前 CI 必须全绿**
+- 发布构建：`GOARCH=amd64 CGO_ENABLED=0 go build` 产出单文件
+
 ## 3. 输入与目标处理
 
 - 单目标：`scanner -u example.com`；批量：`scanner -l targets.txt`
